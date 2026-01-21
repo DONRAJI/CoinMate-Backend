@@ -37,7 +37,7 @@ class TradeManager:
         
         # 설정값
         # 🔥 [수정 포인트] 시드가 적을 때는 1~2개로 집중 투자 (현재 1로 설정됨)
-        self.MAX_COIN_COUNT = 1
+        self.MAX_COIN_COUNT = 4 
         self.MIN_ORDER_KRW = 6000
         self.PROFIT_TARGET = 3.5
         self.STOP_LOSS = -3.0
@@ -163,25 +163,28 @@ class TradeManager:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
     async def process_buying(self):
-        # 1. 자리 있나 확인
+        # --- [1] 먼저 예산/슬롯 확인 ---
         active_cnt = self.repo.get_trade_count()
         empty_slots = self.MAX_COIN_COUNT - active_cnt
-        if empty_slots <= 0: return
         
-        # 2. 예산 확인
         krw = self.executor.get_krw_balance()
-        if krw < self.MIN_ORDER_KRW: return
+        # 예산 부족해도 분석은 돌아가야 하므로 여기서는 체크만 함
+        can_buy = (empty_slots > 0) and (krw >= self.MIN_ORDER_KRW)
         
-        budget = (krw * 0.99) / empty_slots
-        if budget < self.MIN_ORDER_KRW: budget = krw * 0.99
+        budget = 0
+        if can_buy:
+            budget = (krw * 0.99) / empty_slots
+            if budget < self.MIN_ORDER_KRW: budget = krw * 0.99
 
-        # 3. 종목 스캔
+        # --- [2] 종목 스캔 & 점수 업데이트 (항상 실행!) ---
         candidates = []
+        
+        # 타겟 코인들을 순회하며 점수 계산 (보유 여부 상관없이 UI 갱신을 위해)
         for ticker in self.target_coins:
-            # 쿨타임 & 보유중 체크
+            # 쿨타임 & 보유중 체크 (매수 대상에서만 제외할 뿐, 점수는 계산해야 함)
             last_sell = self.sell_timestamps.get(ticker, 0)
-            if time.time() - last_sell < self.REBUY_COOLDOWN: continue
-            if self._is_holding(ticker): continue
+            is_cooldown = (time.time() - last_sell < self.REBUY_COOLDOWN)
+            is_holding = self._is_holding(ticker)
 
             # 전략 분석
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
@@ -189,54 +192,48 @@ class TradeManager:
             
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             
-            # 이름표 붙이기
-            res['ticker'] = ticker 
-            res['current_price'] = current
-            
+            # 🔥 [핵심] 여기서 상태를 업데이트해줘야 프론트엔드에 점수가 뜸
             self._update_market_status(ticker, current, res)
             
-            # ---------------------------------------------------------
-            # 🔥 [핵심 업그레이드] 과열/함정 필터링 로직
-            # ---------------------------------------------------------
+            # 매수 불가능한 상황이면 후보군 등록 스킵
+            if not can_buy or is_holding or is_cooldown: continue
+
+            # --- 아래는 매수 후보 필터링 로직 ---
+            res['ticker'] = ticker 
+            res['current_price'] = current
+
             rsi = res['rsi']
             mfi = res.get('mfi', 50)
             score = res['score']
 
-            # 1. 절대 과열 기준 (너무 비쌈)
-            if rsi >= 70: continue         # RSI 과열
-            if mfi >= 80: continue         # 자금 유입 과다 (고점 징후)
-            
-            # 2. 가짜 상승 필터 (가격은 오르는데 돈이 안 들어옴)
-            # RSI는 65로 높은데 MFI가 40 밑이다? -> 개미 꼬시기일 확률 높음
+            if rsi >= 70: continue        
+            if mfi >= 80: continue       
             if rsi >= 60 and mfi < 40: continue
-
-            # 3. 점수 커트라인 (지표 중복을 고려해 6.0 -> 7.0으로 상향 조정)
-            # 추세 지표가 많아서 6점은 너무 쉽게 넘기 때문입니다.
-            if score < 7.0: continue
+            if score < 7.0: continue # 기준점
 
             candidates.append(res)
         
-        # 4. 점수순 정렬 및 매수 실행
-        # 점수 높은 순 -> MFI 낮은 순 (아직 돈이 덜 들어와서 먹을 게 남은 놈)
-        candidates.sort(key=lambda x: (x['score'], x['mfi']), reverse=True)
-        final_picks = candidates[:empty_slots]
-        
-        for pick in final_picks:
-            ticker = pick.get('ticker')
-            price = pick.get('current_price')
+        # --- [3] 실제 매수 실행 (살 수 있을 때만) ---
+        if candidates and can_buy:
+            candidates.sort(key=lambda x: (x['score'], x['mfi']), reverse=True)
+            final_picks = candidates[:empty_slots]
             
-            if not ticker: continue
-            
-            strategies = [k for k, v in pick['strategies'].items() if v == 1]
-            strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
-            
-            print(f"🏆 [Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / MFI:{pick['mfi']:.1f}) -> 매수")
-            
-            success = await self.executor.try_buy(ticker, price, budget, strategy_name)
-            if success:
-                if ticker in self.market_status:
-                    self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
-                await asyncio.sleep(0.2)
+            for pick in final_picks:
+                ticker = pick.get('ticker')
+                price = pick.get('current_price')
+                
+                if not ticker: continue
+                
+                strategies = [k for k, v in pick['strategies'].items() if v == 1]
+                strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
+                
+                print(f"🏆 [Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f}) -> 매수")
+                
+                success = await self.executor.try_buy(ticker, price, budget, strategy_name)
+                if success:
+                    if ticker in self.market_status:
+                        self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
+                    await asyncio.sleep(0.2)
 
     # -----------------------------------------------------------
     # ✋ [신규] 수동 매매 기능 (프론트엔드 버튼 클릭 시 호출)
@@ -304,7 +301,7 @@ class TradeManager:
         try:
             if not self.shared_data: return
             
-            # 1. 종목 선정 로직 (기존 유지)
+            # 1. 거래량 상위 종목 선정
             MIN_TRADE_PRICE = 5_000_000_000 
             all_data = list(self.shared_data.items())
             sorted_by_vol = sorted(all_data, key=lambda x: x[1]['acc_trade_price_24h'], reverse=True)
@@ -330,49 +327,43 @@ class TradeManager:
                         targets_map[t] = "거래량 상위(보충)"
                         if len(targets_map) >= 10: break
 
-            # -----------------------------------------------------------
-            # 🔥 [수정] 2. 지갑 동기화 (양방향 Sync)
-            # -----------------------------------------------------------
+            # 2. 지갑 동기화 (DB Row 객체 대응 수정)
             try:
-                # (1) 실제 지갑 잔고 조회
                 real_balances = await asyncio.to_thread(self.executor.get_all_balances)
+                db_trades = self.repo.get_open_trades() 
                 
-                # (2) DB에 있는 거래 내역 조회
-                db_trades = self.repo.get_open_trades() # [(id, ticker, price), ...]
-                db_tickers = [t[1] for t in db_trades]
+                # 🔥 [수정] DB 결과가 Row 객체(dict)이므로 이름으로 접근
+                db_tickers = [t['ticker'] for t in db_trades]
                 
                 real_wallet_tickers = []
                 
-                # A. 지갑 데이터 가공
-                if real_balances:
+                if isinstance(real_balances, list):
                     for b in real_balances:
-                        if b['currency'] == 'KRW': continue
+                        if not isinstance(b, dict) or b['currency'] == 'KRW': continue
                         
                         ticker = f"KRW-{b['currency']}"
                         qty = float(b['balance']) + float(b['locked'])
                         avg_price = float(b['avg_buy_price'])
                         total_val = qty * avg_price
                         
-                        # 5000원 이상인 코인만 유효한 것으로 인정
                         if total_val > 5000:
                             real_wallet_tickers.append(ticker)
-                            
-                            # 🔥 [핵심 추가] 지갑엔 있는데 DB에 없으면 -> DB에 추가 (Import)
                             if ticker not in db_tickers:
-                                print(f"📥 [Sync] {ticker} 지갑 보유분 발견 -> DB에 등록합니다.")
+                                print(f"📥 [Sync] {ticker} 지갑 보유분 발견 -> DB 등록")
                                 self.repo.log_buy(ticker, avg_price, total_val)
-                                # 등록했으니 db_tickers 목록에도 즉시 추가 (아래 UI 로직 위해)
                                 db_tickers.append(ticker) 
 
-                for t_id, t_ticker, _, _, _ in db_trades:
+                # 🔥 [수정] 언패킹 에러 방지 (Row 객체 대응)
+                for trade in db_trades:
+                    t_id = trade['id']
+                    t_ticker = trade['ticker']
+                    
                     if t_ticker not in real_wallet_tickers:
                         print(f"🧹 [Sync] {t_ticker} 지갑에 없음 -> DB 정리")
                         self.repo.close_zombie_trade(t_id)
                 
-                # C. UI용 카테고리 업데이트
-                # 방금 동기화된 최신 DB 목록을 다시 가져와서 태그 달기
+                # UI 카테고리 업데이트
                 final_open_tickers = self.repo.get_all_open_tickers()
-                
                 for t in final_open_tickers:
                     if t in targets_map:
                         if "(보유중)" not in targets_map[t]: 
@@ -383,7 +374,7 @@ class TradeManager:
             except Exception as e:
                 print(f"Sync Error: {e}")
 
-            # 3. Market Status 업데이트 (기존 동일)
+            # 3. Market Status 업데이트 (기존 유지)
             final_targets = list(targets_map.keys())
             missing_tickers = [t for t in final_targets if t not in self.shared_data]
             if missing_tickers:
@@ -400,19 +391,14 @@ class TradeManager:
                 cached = self.backtester.get_analysis(ticker)
                 realtime_price = self.shared_data.get(ticker, {}).get('current_price', 0)
                 
-                new_status[ticker] = {
+                # 기존 데이터 유지하며 업데이트
+                new_status[ticker] = existing.copy()
+                new_status[ticker].update({
                     "price": realtime_price,
-                    "score": cached.get('score', 0) if cached else existing.get('score', 0),
-                    "reasons": existing.get('reasons', []),
-                    "target": cached.get('target_price', 0) if cached else existing.get("target", 0),
-                    "rsi": cached.get('rsi', 50) if cached else 50,
-                    "mfi": cached.get('mfi', 50) if cached else 50,
-                    "atr": cached.get('atr', 0) if cached else 0,
-                    "stop_loss_price": cached.get('stop_loss_price', 0) if cached else 0,
-                    "strategies": cached.get('strategies', {}) if cached else {},
-                    "score_breakdown": cached.get('score_breakdown', []) if cached else [],
-                    "category": targets_map.get(ticker, "관찰 종목")
-                }
+                    "category": targets_map.get(ticker, "관찰 종목"),
+                    "score": existing.get('score', cached.get('score', 0) if cached else 0)
+                })
+                
             self.target_coins = final_targets
             self.market_status = new_status
             
