@@ -26,7 +26,7 @@ class Backtester:
         self.results_cache = {}
         self.is_running = False
         self.initialized = True
-        self.semaphore = asyncio.Semaphore(10) # 동시 요청 제한 (API 과부하 방지)
+        self.semaphore = asyncio.Semaphore(10) 
 
     def get_today_filename(self):
         return os.path.join(CACHE_DIR, f"analysis_{datetime.now().strftime('%Y-%m-%d')}.json")
@@ -70,12 +70,10 @@ class Backtester:
         
         try:
             tickers = pyupbit.get_tickers(fiat="KRW")
-            # 비동기 작업 생성 및 실행
             tasks = [self._analyze_one_safe(ticker) for ticker in tickers]
             await asyncio.gather(*tasks)
 
             if self.results_cache:
-                # 결과 저장
                 with open(cache_file, 'w', encoding='utf-8') as f:
                     json.dump(self.results_cache, f, ensure_ascii=False, indent=4)
                 
@@ -87,12 +85,10 @@ class Backtester:
             self.is_running = False
 
     def _save_report_txt(self):
-        """분석 결과를 리포트로 저장"""
         try:
             report_file = self.get_report_filename()
             items = list(self.results_cache.values())
             
-            # 정렬 기준: 점수(높은순) > 승률(높은순) > 수익률(높은순)
             sorted_items = sorted(
                 items, 
                 key=lambda x: (x['score'], x['win_rate'], x['total_yield']), 
@@ -125,27 +121,17 @@ class Backtester:
     async def _analyze_one_safe(self, ticker):
         async with self.semaphore:
             await self._analyze_one(ticker)
-            # API 호출 제한 준수 (업비트 초당 요청 제한 고려)
             await asyncio.sleep(0.1) 
 
     async def _analyze_one(self, ticker):
         try:
-            # 200일치 데이터 가져오기
-            # [수정 1] to_thread 사용: I/O 블로킹 방지
             df = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=200)
-            
             if df is None or len(df) < 50: return
 
-            # [수정 2] 백테스팅용 데이터 분리
-            # 마지막 행(오늘, 진행중인 캔들)은 제외하고 순수 과거 데이터만 사용
             df_for_backtest = df.iloc[:-1].copy() 
 
-            # 1. 과거 데이터 시뮬레이션 (CPU 연산이므로 별도 스레드 처리)
-            # [수정 3] to_thread 사용: for문이 메인 루프를 멈추는 것 방지
             result = await asyncio.to_thread(self._simulate, df_for_backtest)
             
-            # 2. 현재 시점(오늘 포함) 전략 분석 -> 실시간 매매 판단용
-            # 여기서는 최신 데이터(df)를 그대로 씁니다.
             strategy_res = self.strategy.get_ensemble_signal(df, df)
             
             if not strategy_res: return
@@ -160,19 +146,21 @@ class Backtester:
                 "score": float(strategy_res['score']),
                 "should_buy": bool(strategy_res['should_buy']),
                 "current_price": float(df.iloc[-1]['close']),
+                "target_price": float(strategy_res.get('target_price', 0)),
+                "stop_loss_price": float(strategy_res.get('stop_loss_price', 0)),
+                "atr": float(strategy_res.get('atr', 0)),
                 "rsi": float(strategy_res['rsi']),
                 "mfi": float(strategy_res['mfi']),
-                "strategies": strategies
+                "strategies": strategies,
+                "score_breakdown": strategy_res.get("score_breakdown", [])
             }
         except Exception:
-            # 개별 코인 실패는 무시하고 계속 진행
             pass
 
     def _simulate(self, df):
         """
-        과거 90일 데이터로 백테스팅
-        [핵심 수정 사항] 
-        - 미래 참조 편향 제거: i일의 신호로 i+1일 시가(Open)에 매수
+        과거 90일 데이터 백테스팅
+        🔥 [수정됨] TradeManager의 과열 필터 로직을 그대로 적용하여 현실적인 결과 산출
         """
         try:
             capital = 1000000
@@ -187,26 +175,37 @@ class Backtester:
             days_to_test = min(90, len(df) - 20)
             start_idx = len(df) - days_to_test
             
-            # 마지막 날은 '내일'이 없으므로 len(df)-1 까지만 루프
             for i in range(start_idx, len(df) - 1):
-                # i 시점까지의 데이터로 신호 생성 (오늘 장 마감 기준)
                 past = df.iloc[:i+1]
                 res = self.strategy.get_ensemble_signal(past, past)
                 
                 if not res: continue
                 
-                # [수정] 매매 체결 가격: 다음 날(i+1) 시가(Open)
-                # 이유: 오늘 종가 확인 후 실제 매수는 다음 날 아침에 가능하기 때문
                 next_day_open = float(df.iloc[i+1]['open'])
                 
+                # --- 🔥 [핵심 수정] TradeManager와 동일한 필터링 로직 적용 ---
+                rsi = float(res['rsi'])
+                mfi = float(res.get('mfi', 50))
+                score = float(res['score'])
+
+                is_overheated = False
+                if rsi >= 70: is_overheated = True        # RSI 과열
+                elif mfi >= 80: is_overheated = True      # MFI 과열 (고점 징후)
+                elif rsi >= 60 and mfi < 40: is_overheated = True # 설거지 패턴
+
+                # 매수 조건: 점수 7.0 이상 AND 과열 아님
+                should_buy_final = (score >= 7.0) and (not is_overheated)
+                # --------------------------------------------------------
+
                 # 매수 신호
-                if res['should_buy'] and shares == 0:
+                if should_buy_final and shares == 0:
                     shares = (balance * (1 - self.fee)) / next_day_open
                     balance = 0
                     avg_buy_price = next_day_open
                 
-                # 매도 신호 (보유 중일 때만)
-                elif not res['should_buy'] and shares > 0:
+                # 매도 신호 (TradeManager 기준: 3.5 미만이면 매도)
+                # (물론 실제는 익절/손절 로직이 더 있지만, 백테스트에선 점수 기반으로 단순화)
+                elif score < 3.5 and shares > 0:
                     sell_val = shares * next_day_open * (1 - self.fee)
                     
                     if sell_val > (shares * avg_buy_price): 
@@ -216,12 +215,10 @@ class Backtester:
                     shares = 0
                     trade_count += 1
                     
-                    # MDD 갱신
                     max_balance = max(max_balance, balance)
                     dd = (max_balance - balance) / max_balance * 100
                     mdd = max(mdd, dd)
 
-            # 최종 평가 (보유 중이면 마지막 날 종가로 평가)
             final_asset = balance if balance > 0 else shares * df.iloc[-1]['close']
             
             return {
@@ -237,7 +234,6 @@ class Backtester:
 
     def get_best_opportunities(self, top_n=5):
         candidates = list(self.results_cache.values())
-        # 점수가 0점 이상인 것만 필터링
         candidates = [c for c in candidates if c['score'] > 0]
         
         sorted_cands = sorted(

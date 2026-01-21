@@ -36,7 +36,8 @@ class TradeManager:
         self.REBUY_COOLDOWN = 3600 
         
         # 설정값
-        self.MAX_COIN_COUNT = 4
+        # 🔥 [수정 포인트] 시드가 적을 때는 1~2개로 집중 투자 (현재 1로 설정됨)
+        self.MAX_COIN_COUNT = 1
         self.MIN_ORDER_KRW = 6000
         self.PROFIT_TARGET = 3.5
         self.STOP_LOSS = -3.0
@@ -81,9 +82,9 @@ class TradeManager:
                     await self.update_target_coins()
                     self.cleanup_old_cache()
                     
-                # 09:01 정기 점검
+                # 09:01 정기 점검 (UTC 0시 = 한국 9시)
                 now = datetime.now()
-                if now.hour == 9 and now.minute == 1 and loop_count % 60 == 0:
+                if now.hour == 0 and now.minute == 1 and loop_count % 60 == 0:
                     asyncio.create_task(self.backtester.run_daily_scan())
                     self.sell_timestamps.clear()
 
@@ -105,9 +106,21 @@ class TradeManager:
                 await asyncio.sleep(5)
 
     async def process_selling(self):
+        """
+        [수정 내역]
+        기존: for trade_id, ticker, buy_price, _, _ in open_trades: (개수 안 맞으면 에러남)
+        변경: for trade in open_trades: ... trade['id'] (이름으로 찾으므로 안전함)
+        """
         open_trades = self.repo.get_open_trades()
         
-        for trade_id, ticker, buy_price, _ in open_trades:
+        # 🔥 [핵심 수정] 리스트에서 객체 하나(trade)를 통째로 가져옵니다.
+        for trade in open_trades:
+            # 🔥 [핵심 수정] 순서가 아니라 '이름'으로 값을 꺼냅니다. (DB 컬럼이 늘어나도 안전)
+            trade_id = trade['id']
+            ticker = trade['ticker']
+            buy_price = trade['buy_price']
+            
+            # --- 아래부터는 기존 로직과 동일 ---
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
             if not is_real or current == 0: continue
 
@@ -136,10 +149,9 @@ class TradeManager:
                 if success:
                     self.sell_timestamps[ticker] = time.time()
                     
-                    # 🔥 [수정됨] 매도 성공 시 카테고리를 강제로 초기화!
+                    # 매도 성공 시 카테고리 초기화
                     if ticker in self.market_status:
-                        self.market_status[ticker]["category"] = "관찰 종목" 
-                        # (다음 5분 갱신 때 알아서 원래 등급인 '거래량 상위' 등으로 돌아옵니다)
+                        self.market_status[ticker]["category"] = "관찰 종목"
 
     async def process_buying(self):
         # 1. 자리 있나 확인
@@ -343,7 +355,7 @@ class TradeManager:
                                 # 등록했으니 db_tickers 목록에도 즉시 추가 (아래 UI 로직 위해)
                                 db_tickers.append(ticker) 
 
-                for t_id, t_ticker, _, _ in db_trades:
+                for t_id, t_ticker, _, _, _ in db_trades:
                     if t_ticker not in real_wallet_tickers:
                         print(f"🧹 [Sync] {t_ticker} 지갑에 없음 -> DB 정리")
                         self.repo.close_zombie_trade(t_id)

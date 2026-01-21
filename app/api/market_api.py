@@ -55,7 +55,9 @@ async def analyze_coin(ticker: str):
                 response_data['score'] = realtime_result['score']
                 response_data['strategies'] = realtime_result['strategies']
                 response_data['rsi'] = realtime_result['rsi']
+                response_data['mfi'] = realtime_result['mfi']
                 response_data['should_buy'] = realtime_result['should_buy']
+                response_data["score_breakdown"] = realtime_result.get("score_breakdown", [])
 
         # 백업: TradeManager 감시 대상은 아니지만 실시간 가격은 있는 경우
         elif trade_manager.shared_data and ticker in trade_manager.shared_data:

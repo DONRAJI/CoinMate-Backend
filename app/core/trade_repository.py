@@ -4,15 +4,15 @@ from app.core.database import DB_PATH
 
 class TradeRepository:
     def get_conn(self):
-        return sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # 🔥 [핵심] 컬럼명으로 접근 가능하게 변경
+        return conn
 
     def get_open_trades(self):
-        """현재 매수 중인(안 판) 거래 목록 가져오기"""
         with self.get_conn() as conn:
             cursor = conn.cursor()
-            # 가져올 때 전략 이름도 같이 가져오는 게 좋습니다 (나중에 분석용)
-            cursor.execute("SELECT id, ticker, buy_price, strategy_name FROM trades WHERE status='open'")
-            return cursor.fetchall()
+            cursor.execute("SELECT id, ticker, buy_price, buy_amount, strategy_name FROM trades WHERE status='open'")
+            return cursor.fetchall() # 이제 Row 객체 리스트 반환
 
     def get_trade_count(self):
         with self.get_conn() as conn:

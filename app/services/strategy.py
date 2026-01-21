@@ -4,28 +4,34 @@ import numpy as np
 
 class Strategy:
     def __init__(self):
-        # 📊 [최종 업그레이드] 전략별 가중치 리밸런싱
-        # 총점: 13.0점 만점
+        # 📊 [리밸런싱] 지표 간 상관관계를 고려한 가중치 재설정
+        # 총점: 12.0점 만점
         self.WEIGHTS = {
-            # --- [A] 배경 파악 (Trend & Power) ---
-            "trend": 1.0,       # 20일 이평선 위 (기본)
-            "adx": 1.0,         # [수정] 추세 강도 + 상승 방향 확인
-            "volume": 1.0,      # [수정] 거래량 폭발 + 양봉 확인
-            "vwap": 1.5,        # 세력 평단가 지지
+            # --- [A] 추세 그룹 (Trend & Momentum) ---
+            # 가격이 20MA 위에 있는가? (가장 중요)
+            "trend": 3.0,       
+            # 추세의 강도가 센가?
+            "adx": 1.5,         
+            
+            # --- [B] 수급 그룹 (Volume & VWAP) ---
+            # 거래량이 터졌는가?
+            "volume": 1.0,      
+            # 세력 평단가 위에 있는가?
+            "vwap": 1.5,        
 
-            # --- [B] 진입 타이밍 (Timing & Reversal) ---
-            "bollinger": 2.0,   # [수정] 밴드 하단 반등 + 양봉 확인
-            "stoch": 1.5,       # [수정] 골든크로스 + 적정 구간(20~60)
-            "cci": 1.5,         # 침체 구간(-100) 돌파
-
-            # --- [C] 보조 필터 (Validation) ---
-            "macd": 1.0,        # 추세 방향 확인
-            "rsi": 1.0,         # 과매도 확인
-            "mfi": 1.5          # 자금 흐름
+            # --- [C] 반전/타이밍 그룹 (Oscillators) ---
+            # RSI, MFI, CCI, Stoch는 성격이 비슷하므로 묶어서 관리합니다.
+            # 이 그룹은 내부적으로 평균을 내어 최대 3.0점만 반영합니다.
+            "oscillator_group": 3.0, 
+            
+            # --- [D] 변동성 그룹 (Volatility) ---
+            # 볼린저 밴드 하단 반등 (역추세 매매 핵심)
+            "bollinger": 2.0,   
         }
         
-        # 매수 기준 점수: 13점 만점 중 6.0점 이상 (약 45% 이상의 지표가 동의할 때)
-        self.THRESHOLD = 7.0 
+        # 매수 기준: 7.0 (확실할 때 진입)
+        # 매도 기준: TradeManager에서 3.5 미만일 때 매도로 처리됨
+        self.BUY_THRESHOLD = 7.0 
 
     def get_ensemble_signal(self, df_day: pd.DataFrame, df_min: pd.DataFrame = None, debug=False):
         """
@@ -33,58 +39,77 @@ class Strategy:
         """
         # --- 1. 데이터 유효성 검사 ---
         if df_day is None or len(df_day) < 30:
-            if debug: print("⚠️ [Error] 일봉 데이터 부족")
             return None
-            
         if df_min is None or len(df_min) < 30:
-            if debug: print("⚠️ [Warning] 분봉 데이터 부족 -> 일봉으로 대체")
             df_min = df_day
 
-        # --- 2. 일봉(Day) 분석 ---
+        # --- 2. 지표 계산 ---
+        # (1) 일봉 분석
         day_close = df_day['close']
-        
-        # (1) 추세: 20일 이동평균선
         ma20_day = day_close.rolling(window=20).mean().iloc[-1]
         current_price = day_close.iloc[-1]
+        
+        # 추세 신호 (Trend): 패널티 방식 삭제 -> 점수 획득 방식으로 변경
         is_bull_market = current_price >= ma20_day
-        
-        # (2) ADX (추세 강도 + 방향)
         adx_signal = self._calc_adx(df_day)
-        
-        # (3) 거래량 (폭발 + 양봉)
         vol_signal = self._get_volume_signal(df_day)
-        
-        # --- 3. 분봉(Min) 분석 ---
-        # [Tip] 분봉은 최소 15분봉 이상 권장
+
+        # (2) 분봉 분석
         closes = df_min['close']
-        opens = df_min['open'] # [필수] 양봉 확인용
-        lows = df_min['low']
+        opens = df_min['open']
         highs = df_min['high']
+        lows = df_min['low']
         volumes = df_min['volume']
 
-        # 지표 산출
-        rsi_series = self._calc_rsi_pandas(closes)
-        mfi_series = self._calc_mfi_pandas(highs, lows, closes, volumes)
+        # 개별 오실레이터 계산
+        rsi_val = self._calc_rsi_pandas(closes).iloc[-1]
+        mfi_val = self._calc_mfi_pandas(highs, lows, closes, volumes).iloc[-1]
+        stoch_signal = self._get_stochastic_signal(df_min)
+        cci_signal = self._calc_cci(highs, lows, closes)
+        
+        # 기타 지표
+        vwap_signal = self._calc_vwap_signal(df_min)
+        bollinger_score = self._sig_bollinger(closes, opens)
         atr_value = self._calc_atr_pandas(highs, lows, closes)
         
-        # 신규 지표 계산
-        cci_signal = self._calc_cci(highs, lows, closes)
-        vwap_signal = self._calc_vwap_signal(df_min)
-        
-        # 기존 지표
+        # 기존 MACD 계산 (참고용)
         macd_score = self._calc_macd_score(closes)
-        
-        # [수정] 시가(opens) 전달 -> 양봉 체크
-        bollinger_score = self._sig_bollinger(closes, opens) 
-        
-        stoch_signal = self._get_stochastic_signal(df_min)
 
-        # 현재 값 추출
-        rsi_value = rsi_series.iloc[-1]
-        mfi_value = mfi_series.iloc[-1]
+        # --- 3. 오실레이터 그룹 점수 통합 (핵심 변경 사항) ---
+        # 비슷하게 움직이는 지표들을 모아서 '하나의 의견'으로 만듭니다.
+        # 각각 1점(긍정), 0점(중립), -1점(부정) 부여 후 평균 계산
         
-        # --- 4. 시그널 종합 ---
-        signals = {
+        osc_scores = []
+        
+        # RSI (35이하 매수, 65이상 매도 - 기준 약간 완화)
+        if rsi_val < 35: osc_scores.append(1) 
+        elif rsi_val > 65: osc_scores.append(-1)
+        else: osc_scores.append(0)
+
+        # MFI (20이하 매수, 80이상 매도)
+        if mfi_val < 20: osc_scores.append(1)
+        elif mfi_val > 80: osc_scores.append(-1)
+        else: osc_scores.append(0)
+        
+        # CCI (-100 상향 돌파)
+        osc_scores.append(1 if cci_signal == 1 else 0)
+        
+        # Stochastic (골든크로스)
+        osc_scores.append(1 if stoch_signal else 0)
+
+        # 오실레이터 종합 점수 (-1.0 ~ 1.0 사이의 비율)
+        # 예: 4개 중 3개가 좋으면 0.75, 4개가 다 나쁘면 -1.0
+        osc_ratio = sum(osc_scores) / len(osc_scores) if osc_scores else 0
+        
+        # 최종 점수에 반영될 오실레이터 점수 (최대 3.0점)
+        final_osc_score = osc_ratio * self.WEIGHTS["oscillator_group"]
+
+        # --- 4. 최종 점수 계산 ---
+        total_score = 0
+        logs = []
+        
+        # 개별 전략 신호 맵 (디버깅/UI 표시용)
+        strategies_map = {
             "trend": 1 if is_bull_market else -1,
             "adx": adx_signal,
             "volume": vol_signal,
@@ -93,48 +118,50 @@ class Strategy:
             "stoch": 1 if stoch_signal else 0,
             "cci": cci_signal,
             "macd": macd_score,
-            "rsi": self._eval_rsi(rsi_value),
-            "mfi": self._eval_mfi(mfi_value)
+            "rsi": self._eval_rsi(rsi_val),
+            "mfi": self._eval_mfi(mfi_val),
         }
 
-        # --- 5. 점수 계산 (Scoring) ---
-        total_score = 0
-        logs = []
+        # (A) 추세 (Trend): 3.0점
+        if is_bull_market:
+            total_score += self.WEIGHTS["trend"]
+            if debug: logs.append(f"✅ [Trend] 상승 추세 (+{self.WEIGHTS['trend']})")
+        else:
+            # 패널티를 주는 대신 점수를 안 줌 (0점) -> 급격한 점수 하락 방지
+            if debug: logs.append(f"📉 [Trend] 하락 추세 (0.0)")
 
-        # (A) 하락장 패널티 (Risk Management)
-        if not is_bull_market:
-            score_change = -3.0 
-            total_score += score_change
-            if debug: logs.append(f"📉 [Trend] 하락 추세 (Price < 20MA) -> 패널티 {score_change}")
+        # (B) ADX
+        if adx_signal:
+            total_score += self.WEIGHTS["adx"]
+            if debug: logs.append(f"✅ [ADX] 강한 추세 (+{self.WEIGHTS['adx']})")
 
-        # (B) 지표별 점수 합산
-        for key, weight in self.WEIGHTS.items():
-            signal = signals.get(key, 0)
-            
-            # RSI/CCI 과매도 부스트 (바닥 잡기)
-            if key in ["rsi", "cci"] and signal == 1:
-                score_change = weight + 0.5
-                total_score += score_change
-                if debug: logs.append(f"🔥 [{key.upper()}] 바닥 탈출 신호! (+{score_change})")
-                
-            # 일반 점수 합산
-            elif signal == 1:
-                total_score += weight
-                if debug: logs.append(f"✅ [{key.upper()}] 긍정 신호 (+{weight})")
-            
-            # 매도 신호 차감
-            elif signal == -1:
-                deduction = weight * 0.5
-                total_score -= deduction
-                if debug: logs.append(f"🔻 [{key.upper()}] 부정 신호 (-{deduction})")
+        # (C) 거래량 & VWAP
+        if vol_signal: total_score += self.WEIGHTS["volume"]
+        if vwap_signal: total_score += self.WEIGHTS["vwap"]
 
-        # (C) 점수 보정
+        # (D) 오실레이터 그룹 (통합 점수)
+        if final_osc_score > 0:
+            total_score += final_osc_score
+            if debug: logs.append(f"✅ [Oscillators] 바닥/반전 신호 종합 (+{final_osc_score:.2f})")
+        elif final_osc_score < 0:
+            # 매도 신호가 강할 경우 점수 차감 (절반 정도만 반영)
+            deduction = abs(final_osc_score) * 0.5 
+            total_score -= deduction
+            if debug: logs.append(f"🔻 [Oscillators] 과열/매도 신호 종합 (-{deduction:.2f})")
+
+        # (E) 볼린저 밴드 (역추세 매매의 핵심)
+        if bollinger_score == 1:
+            total_score += self.WEIGHTS["bollinger"]
+            if debug: logs.append(f"🔥 [Bollinger] 반등 유력 (+{self.WEIGHTS['bollinger']})")
+        elif bollinger_score == -1: # 상단 터치
+            total_score -= 1.0 # 소폭 차감
+
         final_score = round(max(0, total_score), 2)
 
-        # --- 6. 목표가/손절가 (ATR 기반) ---
-        target_price = current_price + (atr_value * 3.0) # 목표가 상향 (추세 추종)
-        stop_loss_price = current_price - (atr_value * 1.5)
-        
+        # --- 5. 목표가/손절가 ---
+        target_price = current_price + (atr_value * 3.0)
+        stop_loss_price = current_price - (atr_value * 2.0) # 손절 여유 좀 더 줌
+
         # --- 디버그 출력 ---
         if debug:
             print("\n" + "="*60)
@@ -143,30 +170,30 @@ class Strategy:
             for log in logs:
                 print(log)
             print("-" * 60)
-            print(f" 🔍 RSI: {rsi_value:.1f} | MFI: {mfi_value:.1f} | ATR: {atr_value:.0f}")
-            print(f" 🏆 최종 점수: {final_score} / 13.0 (기준: {self.THRESHOLD})")
-            print(f" 🚦 판단: {'BUY 🚀' if final_score >= self.THRESHOLD else 'WAIT ✋'}")
+            print(f" 🔍 RSI: {rsi_val:.1f} | MFI: {mfi_val:.1f} | Osc_Ratio: {osc_ratio:.2f}")
+            print(f" 🏆 최종 점수: {final_score} / 12.0 (매수 기준: {self.BUY_THRESHOLD})")
+            print(f" 🚦 판단: {'BUY 🚀' if final_score >= self.BUY_THRESHOLD else 'WAIT ✋'}")
             print("="*60 + "\n")
 
         return {
-            "ticker": "UNKNOWN",
-            "should_buy": final_score >= self.THRESHOLD,
+            "should_buy": final_score >= self.BUY_THRESHOLD,
             "score": final_score,
             "current_price": float(current_price),
             "target_price": round(target_price, 0),
             "stop_loss_price": round(stop_loss_price, 0),
             "atr": round(atr_value, 0),
-            "strategies": signals,
-            "rsi": float(rsi_value),
-            "mfi": float(mfi_value)
+            "rsi": float(rsi_val),
+            "mfi": float(mfi_val),
+            "strategies": strategies_map,
+            "score_breakdown": logs
         }
 
     # =========================================================
-    #  Logic Methods (Indicators)
+    #  Logic Methods (Indicators) - 기존 코드 유지
     # =========================================================
 
     def _calc_adx(self, df, n=14):
-        """[수정됨] ADX: 추세 강도(20이상) AND 상승 추세(PDI > MDI) 확인"""
+        """ADX: 추세 강도(20이상) AND 상승 추세(PDI > MDI) 확인"""
         if len(df) < n * 2: return 0
         
         high = df['high']
@@ -199,13 +226,12 @@ class Strategy:
         curr_pdi = pdi.iloc[-1]
         curr_mdi = mdi.iloc[-1]
         
-        # [핵심 수정] 추세가 강하면서(20↑) + 매수세가 우위(PDI > MDI)일 때만
         if curr_adx >= 20 and curr_pdi > curr_mdi:
             return 1
         return 0
 
     def _get_volume_signal(self, df):
-        """[수정됨] 거래량 폭발 AND 양봉(Close > Open) 확인"""
+        """거래량 폭발 AND 양봉(Close > Open) 확인"""
         volume = df['volume']
         close = df['close']
         open_p = df['open']
@@ -215,9 +241,7 @@ class Strategy:
         vol_ma20 = volume.rolling(20).mean().iloc[-1]
         curr_vol = volume.iloc[-1]
         
-        # 거래량 급증 (1.5배)
         is_explosive = curr_vol > (vol_ma20 * 1.5)
-        # 양봉 확인
         is_bullish = close.iloc[-1] > open_p.iloc[-1]
         
         if is_explosive and is_bullish:
@@ -225,7 +249,7 @@ class Strategy:
         return 0
 
     def _get_stochastic_signal(self, df, n=14, k=3):
-        """[수정됨] 골든크로스 AND 적정 구간(20~60) 진입"""
+        """골든크로스 AND 적정 구간(20~60) 진입"""
         if len(df) < n: return False
         
         low_min = df['low'].rolling(n).min()
@@ -241,11 +265,10 @@ class Strategy:
         curr_k = slow_k.iloc[-1]
         curr_d = slow_d.iloc[-1]
         
-        # [핵심 수정] 80 근처 고점 추격 매수 방지 (20 <= k <= 60)
         return (curr_k > curr_d) and (20 <= curr_k <= 60)
 
     def _sig_bollinger(self, closes, opens, period=20, k=2, threshold=1.02):
-        """[수정됨] 밴드 하단 터치 + 양봉 반등 확인"""
+        """밴드 하단 터치 + 양봉 반등 확인"""
         if len(closes) < period: return 0
             
         ma = closes.rolling(period).mean()
