@@ -1,6 +1,5 @@
 import asyncio
 from contextlib import asynccontextmanager
-# from multiprocessing import Manager  <-- 이거 이제 필요 없음 (삭제)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,59 +13,32 @@ loop_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    [서버 생명주기 관리]
-    """
     global collector, loop_task
 
     print("\n>>> 🟢 [System] CoinMate 서버 시작 중...")
 
-    # 🔥 [핵심 수정] Manager().dict() 대신 그냥 일반 딕셔너리 사용!
-    # 같은 프로세스 안에서는 이걸로도 충분히 공유되며, 훨씬 빠르고 락(Lock)이 안 걸림.
+    # 🔥 [수정 1] Manager 삭제 -> 일반 딕셔너리 사용 (속도 향상 & 락 방지)
     shared_data = {} 
-    print(">>> 💾 [System] 고속 메모리(Fast Dict) 초기화 완료")
+    print(f">>> 💾 [System] 고속 메모리(Fast Dict) 초기화 완료 (ID: {id(shared_data)})")
 
-    # 1. 수집기 실행 (이제 일반 dict에 데이터를 꽂아줌)
+    # 1. 수집기 실행
     collector = start_collector_thread(shared_data)
     
-    # 2. TradeManager 연결 (같은 dict를 읽음)
+    # 2. TradeManager 연결
     trade_manager.set_shared_data(shared_data)
     
     # 3. 백그라운드 루프 실행
     loop_task = asyncio.create_task(trade_manager.run_loop())
     print(">>> 🤖 [System] TradeManager 백그라운드 루프 시작됨")
 
-    yield  # 서버 가동 중...
+    yield
 
-    # ==========================================
-    # 종료 절차
-    # ==========================================
     print("\n>>> 🔴 [System] 서버 종료 절차 시작...")
+    if loop_task: loop_task.cancel()
+    if collector: collector.stop()
+    print(">>> 👋 [System] Bye Bye!")
 
-    # 1. 트레이딩 루프부터 강제 종료
-    if loop_task:
-        print(">>> 🛑 [System] 백그라운드 루프 종료 중...")
-        loop_task.cancel()
-        try:
-            await loop_task
-        except asyncio.CancelledError:
-            pass
-    
-    # 2. 수집기 종료
-    if collector:
-        collector.stop()
-        print(">>> 🔌 [System] 데이터 수집기 종료 완료")
-
-    # (Manager 종료 코드는 필요 없음)
-
-    print(">>> 👋 [System] Bye Bye! (Clean Exit)")
-
-app = FastAPI(
-    title="CoinMate AI Trading System",
-    description="Upbit Automatic Trading Bot with React Dashboard",
-    version="2.0.0",
-    lifespan=lifespan 
-)
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,7 +48,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 라우터 등록 (사용자님 코드 유지)
 app.include_router(market_api.router, prefix="/market", tags=["Market Data"])
 app.include_router(trade_api.router, prefix="/trade", tags=["Trading Control"])
 
@@ -86,4 +57,5 @@ def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # 🔥 [수정 2] reload=False로 변경 (봇 실행 시 필수)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)

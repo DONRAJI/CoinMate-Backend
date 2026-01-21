@@ -21,7 +21,7 @@ class TradeManager:
         self.backtester = Backtester()
         
         self.is_active = False
-        self.shared_data = None
+        self.shared_data = {}
         self.market_status = {}
         self.target_coins = []
         
@@ -36,11 +36,10 @@ class TradeManager:
         self.REBUY_COOLDOWN = 3600 
         
         # 설정값
-        # 🔥 [수정 포인트] 시드가 적을 때는 1~2개로 집중 투자 (현재 1로 설정됨)
         self.MAX_COIN_COUNT = 4 
         self.MIN_ORDER_KRW = 6000
         self.PROFIT_TARGET = 3.5
-        self.STOP_LOSS = -3.0
+        self.STOP_LOSS = -2.0
         
         self.STRATEGY_MAP = {
             "trend": "추세", "volume": "거래량폭발", "stoch": "골든크로스",
@@ -48,8 +47,9 @@ class TradeManager:
             "macd": "MACD", "adx": "강한추세", "vwap": "세력평단", "cci": "과매도탈출"
         }
 
-    def set_shared_data(self, shared_dict):
-        self.shared_data = shared_dict
+    def set_shared_data(self, shared_data):
+        self.shared_data = shared_data
+        print(f">>> 🔗 [TradeManager] 데이터 통 연결 완료! (ID: {id(self.shared_data)})")
 
     def start(self):
         self.is_active = True
@@ -62,44 +62,48 @@ class TradeManager:
     async def run_loop(self):
         print(">>> 🔄 Main Loop Initialized...")
         print(">>> ⏳ [System] 실시간 시세 데이터 수신 대기 중...")
-        # --- 🔥 [디버깅 추가] 데이터 수신 현황 찍어보기 ---
-        wait_count = 0
-        while True:
-            data_len = len(self.shared_data) if self.shared_data else 0
         
-        # 초기 데이터 대기
+        # --- [데이터 수신 대기 구간] ---
+        wait_seconds = 0
         while True:
-            if self.shared_data and len(self.shared_data) > 10: 
-                print(">>> 📶 [System] 실시간 데이터 수신 확인됨!")
-                break
-            await asyncio.sleep(1)
+            # 현재 데이터 개수 확인
+            data_len = len(self.shared_data) if self.shared_data else 0
             
-        print(">>> ⏳ [System] 초기 데이터 분석 중...")
+            # 1. 데이터가 충분히 모이면 탈출 (10개 이상)
+            if data_len > 10: 
+                print(f"\n>>> 📶 [System] 실시간 데이터 수신 확인됨! (현재 {data_len}개)")
+                break
+            
+            # 2. 1초마다 로그 찍기 (도대체 몇 개인지 눈으로 확인)
+            if wait_seconds % 2 == 0:
+                print(f">>> ⏳ 데이터 대기 중... (현재: {data_len}개 / 목표: 10개) - {wait_seconds}초 경과")
+            
+            wait_seconds += 1
+            await asyncio.sleep(1)
+        
+        # --- [본격적인 매매 루프] ---
+        print(">>> 🚀 [System] 매매 로직 가동 시작!")
+        
         await self.backtester.run_daily_scan()
-        await self.update_target_coins() # 첫 실행
+        await self.update_target_coins()
         
         loop_count = 0
         while True:
             try:
-                # 5분마다 타겟 갱신 & 동기화 & 캐시 정리
+                # ... (기존 매매 로직 유지) ...
                 if loop_count % 300 == 0:
                     await self.update_target_coins()
                     self.cleanup_old_cache()
-                    
-                # 09:01 정기 점검 (UTC 0시 = 한국 9시)
+                
                 now = datetime.now()
                 if now.hour == 0 and now.minute == 1 and loop_count % 60 == 0:
                     asyncio.create_task(self.backtester.run_daily_scan())
                     self.sell_timestamps.clear()
 
-                # 1. 매도 진행 (Executor에게 위임)
                 await self.process_selling()
-                
-                # 2. 매수 진행 (Executor에게 위임)
                 if self.is_active:
                     await self.process_buying()
                 
-                # 프론트엔드용 데이터 생성
                 self.update_frontend_cache()
                 
                 loop_count += 1
