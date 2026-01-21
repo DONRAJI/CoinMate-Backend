@@ -301,7 +301,7 @@ class TradeManager:
         try:
             if not self.shared_data: return
             
-            # 1. 거래량 상위 종목 선정
+            # --- [1] 종목 선정 로직 (기존 동일) ---
             MIN_TRADE_PRICE = 5_000_000_000 
             all_data = list(self.shared_data.items())
             sorted_by_vol = sorted(all_data, key=lambda x: x[1]['acc_trade_price_24h'], reverse=True)
@@ -327,55 +327,43 @@ class TradeManager:
                         targets_map[t] = "거래량 상위(보충)"
                         if len(targets_map) >= 10: break
 
-            # 2. 지갑 동기화 (DB Row 객체 대응 수정)
+            # --- [2] 지갑 동기화 (기존 동일) ---
             try:
                 real_balances = await asyncio.to_thread(self.executor.get_all_balances)
                 db_trades = self.repo.get_open_trades() 
-                
-                # 🔥 [수정] DB 결과가 Row 객체(dict)이므로 이름으로 접근
                 db_tickers = [t['ticker'] for t in db_trades]
-                
                 real_wallet_tickers = []
                 
                 if isinstance(real_balances, list):
                     for b in real_balances:
                         if not isinstance(b, dict) or b['currency'] == 'KRW': continue
-                        
                         ticker = f"KRW-{b['currency']}"
                         qty = float(b['balance']) + float(b['locked'])
                         avg_price = float(b['avg_buy_price'])
                         total_val = qty * avg_price
-                        
                         if total_val > 5000:
                             real_wallet_tickers.append(ticker)
                             if ticker not in db_tickers:
-                                print(f"📥 [Sync] {ticker} 지갑 보유분 발견 -> DB 등록")
                                 self.repo.log_buy(ticker, avg_price, total_val)
                                 db_tickers.append(ticker) 
 
-                # 🔥 [수정] 언패킹 에러 방지 (Row 객체 대응)
                 for trade in db_trades:
-                    t_id = trade['id']
-                    t_ticker = trade['ticker']
-                    
-                    if t_ticker not in real_wallet_tickers:
-                        print(f"🧹 [Sync] {t_ticker} 지갑에 없음 -> DB 정리")
-                        self.repo.close_zombie_trade(t_id)
+                    if trade['ticker'] not in real_wallet_tickers:
+                        self.repo.close_zombie_trade(trade['id'])
                 
-                # UI 카테고리 업데이트
                 final_open_tickers = self.repo.get_all_open_tickers()
                 for t in final_open_tickers:
                     if t in targets_map:
-                        if "(보유중)" not in targets_map[t]: 
-                            targets_map[t] += " (보유중)"
+                        if "(보유중)" not in targets_map[t]: targets_map[t] += " (보유중)"
                     else:
                         targets_map[t] = "내 보유 코인 (관리중)"
-                        
             except Exception as e:
                 print(f"Sync Error: {e}")
 
-            # 3. Market Status 업데이트 (기존 유지)
+            # --- [3] Market Status 업데이트 (🔥 핵심 수정 부분) ---
             final_targets = list(targets_map.keys())
+            
+            # 없는 가격 데이터 채워넣기
             missing_tickers = [t for t in final_targets if t not in self.shared_data]
             if missing_tickers:
                 try:
@@ -391,13 +379,43 @@ class TradeManager:
                 cached = self.backtester.get_analysis(ticker)
                 realtime_price = self.shared_data.get(ticker, {}).get('current_price', 0)
                 
-                # 기존 데이터 유지하며 업데이트
-                new_status[ticker] = existing.copy()
-                new_status[ticker].update({
+                # 🔥 [안전장치] 모든 필수 필드의 기본값을 미리 정의
+                base_data = {
                     "price": realtime_price,
-                    "category": targets_map.get(ticker, "관찰 종목"),
-                    "score": existing.get('score', cached.get('score', 0) if cached else 0)
-                })
+                    "score": 0,
+                    "reasons": [],
+                    "target": 0,
+                    "rsi": 50,  # 기본값 50 (에러 방지용)
+                    "mfi": 50,
+                    "atr": 0,
+                    "stop_loss_price": 0,
+                    "strategies": {},
+                    "score_breakdown": [],
+                    "category": targets_map.get(ticker, "관찰 종목")
+                }
+                
+                # 1. 기존 메모리에 있던 데이터 덮어쓰기 (화면 깜빡임 방지)
+                if existing:
+                    base_data.update(existing)
+                
+                # 2. 백테스터 최신 분석 결과가 있으면 덮어쓰기
+                if cached:
+                    base_data.update({
+                        "score": cached.get('score', 0),
+                        "target": cached.get('target_price', 0),
+                        "rsi": cached.get('rsi', 50),
+                        "mfi": cached.get('mfi', 50),
+                        "atr": cached.get('atr', 0),
+                        "stop_loss_price": cached.get('stop_loss_price', 0),
+                        "strategies": cached.get('strategies', {}),
+                        "score_breakdown": cached.get('score_breakdown', [])
+                    })
+                
+                # 3. 실시간 변동 데이터(가격, 카테고리)는 무조건 최신으로
+                base_data["price"] = realtime_price
+                base_data["category"] = targets_map.get(ticker, "관찰 종목")
+                
+                new_status[ticker] = base_data
                 
             self.target_coins = final_targets
             self.market_status = new_status
