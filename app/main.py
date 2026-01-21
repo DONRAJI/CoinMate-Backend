@@ -1,16 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager
-from multiprocessing import Manager
+# from multiprocessing import Manager  <-- 이거 이제 필요 없음 (삭제)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# 🔥 [Fix] 경로 수정: app.api.endpoints -> app.api
 from app.api import market_api, trade_api
 from app.services.collector import start_collector_thread
 from app.services.trade_manager import trade_manager
 
 # 전역 변수
-shared_manager = None
 collector = None
 loop_task = None
 
@@ -19,22 +17,22 @@ async def lifespan(app: FastAPI):
     """
     [서버 생명주기 관리]
     """
-    global shared_manager, collector, loop_task
+    global collector, loop_task
 
     print("\n>>> 🟢 [System] CoinMate 서버 시작 중...")
 
-    # 1. 공유 메모리 생성
-    shared_manager = Manager()
-    shared_data = shared_manager.dict()
-    print(">>> 💾 [System] 공유 메모리(Shared Memory) 초기화 완료")
+    # 🔥 [핵심 수정] Manager().dict() 대신 그냥 일반 딕셔너리 사용!
+    # 같은 프로세스 안에서는 이걸로도 충분히 공유되며, 훨씬 빠르고 락(Lock)이 안 걸림.
+    shared_data = {} 
+    print(">>> 💾 [System] 고속 메모리(Fast Dict) 초기화 완료")
 
-    # 2. 수집기 실행
+    # 1. 수집기 실행 (이제 일반 dict에 데이터를 꽂아줌)
     collector = start_collector_thread(shared_data)
     
-    # 3. TradeManager 연결
+    # 2. TradeManager 연결 (같은 dict를 읽음)
     trade_manager.set_shared_data(shared_data)
     
-    # 4. 백그라운드 루프 실행
+    # 3. 백그라운드 루프 실행
     loop_task = asyncio.create_task(trade_manager.run_loop())
     print(">>> 🤖 [System] TradeManager 백그라운드 루프 시작됨")
 
@@ -59,10 +57,7 @@ async def lifespan(app: FastAPI):
         collector.stop()
         print(">>> 🔌 [System] 데이터 수집기 종료 완료")
 
-    # 3. 공유 메모리 해제
-    if shared_manager:
-        shared_manager.shutdown()
-        print(">>> 💾 [System] 공유 메모리 해제 완료")
+    # (Manager 종료 코드는 필요 없음)
 
     print(">>> 👋 [System] Bye Bye! (Clean Exit)")
 
@@ -81,7 +76,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 라우터 등록
+# 라우터 등록 (사용자님 코드 유지)
 app.include_router(market_api.router, prefix="/market", tags=["Market Data"])
 app.include_router(trade_api.router, prefix="/trade", tags=["Trading Control"])
 
@@ -91,4 +86,4 @@ def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
