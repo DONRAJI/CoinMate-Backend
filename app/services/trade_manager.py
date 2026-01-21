@@ -62,6 +62,10 @@ class TradeManager:
     async def run_loop(self):
         print(">>> 🔄 Main Loop Initialized...")
         print(">>> ⏳ [System] 실시간 시세 데이터 수신 대기 중...")
+        # --- 🔥 [디버깅 추가] 데이터 수신 현황 찍어보기 ---
+        wait_count = 0
+        while True:
+            data_len = len(self.shared_data) if self.shared_data else 0
         
         # 초기 데이터 대기
         while True:
