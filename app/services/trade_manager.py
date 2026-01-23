@@ -39,8 +39,8 @@ class TradeManager:
         # 설정값
         self.MAX_COIN_COUNT = 4 
         self.MIN_ORDER_KRW = 6000
-        self.CACHE_TTL_SECONDS = 300
-        self.MIN_OHLCV_INTERVAL = 60
+        self.CACHE_TTL_SECONDS = 300   # 🔥 [시스템최적화] 캐시 만료 시간 추가
+        self.MIN_OHLCV_INTERVAL = 60   # 🔥 [시스템최적화] API 호출 제한 시간 추가
         self.TRAILING_START = 2.0
         self.TRAILING_CALLBACK = 1.0
         self.STOP_LOSS = -3.0
@@ -120,20 +120,17 @@ class TradeManager:
     async def process_selling(self):
         """
         [수정 내역]
-        기존: for trade_id, ticker, buy_price, _, _ in open_trades: (개수 안 맞으면 에러남)
-        변경: for trade in open_trades: ... trade['id'] (이름으로 찾으므로 안전함)
+        기존: for trade_id, ticker, buy_price, _, _ in open_trades:
+        변경: for trade in open_trades: ... trade['id']
         """
         open_trades = self.repo.get_open_trades()
         
-        # 🔥 [핵심 수정] 리스트에서 객체 하나(trade)를 통째로 가져옵니다.
         for trade in open_trades:
-            # 🔥 [핵심 수정] 순서가 아니라 '이름'으로 값을 꺼냅니다. (DB 컬럼이 늘어나도 안전)
-            # 주의: TradeRepository의 get_conn에서 row_factory = sqlite3.Row 설정이 되어 있어야 작동합니다.
             trade_id = trade['id']
             ticker = trade['ticker']
             buy_price = trade['buy_price']
             
-            # --- 아래부터는 기존 로직과 동일 ---
+            # 캔들 데이터 조회
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
             if not is_real or current == 0: continue
 
@@ -143,39 +140,43 @@ class TradeManager:
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             self._update_market_status(ticker, current, res)
 
+            # --- [매도 로직 시작] ---
+            
+            # 0. 최고가(Peak) 업데이트
+            peak_price = self.trailing_status.get(ticker, buy_price)
+            if current > peak_price:
+                peak_price = current
+                self.trailing_status[ticker] = peak_price
+
             reason = ""
-            # 1. 손절 기준 (최우선)
+
+            # 1. 손절 기준 (Stop Loss)
             if profit_rate <= self.STOP_LOSS:
                 reason = f"💧손절방어({profit_rate:.2f}%)"
-            else:
-                peak_price = self.trailing_status.get(ticker, buy_price)
-                if current > peak_price:
-                    peak_price = current
-                    self.trailing_status[ticker] = peak_price
 
-                if profit_rate >= self.TRAILING_START:
-                    drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
-                    if drawdown_pct >= self.TRAILING_CALLBACK:
-                        reason = (
-                            f"📉트레일링스탑({profit_rate:.2f}%, "
-                            f"피크-{drawdown_pct:.2f}%)"
-                        )
+            # 2. 트레일링 스탑 (Trailing Stop)
+            elif profit_rate >= self.TRAILING_START:
+                drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
+                if drawdown_pct >= self.TRAILING_CALLBACK:
+                    reason = (
+                        f"📉트레일링스탑({profit_rate:.2f}%, "
+                        f"피크-{drawdown_pct:.2f}%)"
+                    )
             
-            if not reason:
-                # 2. 수익권일 때 과열 지표 체크
-                if profit_rate > 0.5: 
-                    if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
-                    elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
-                
-                # 3. 전략 점수 급락
-                elif res['score'] < 3.5:
-                    reason = f"📉점수하락({res['score']}점)"
-                
-                # 4. 이상 징후 (가격은 내렸는데 MFI만 비정상적으로 높거나 등등)
-                elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
-                    reason = f"⚠️이상징후(설거지감지)"
+            # 3. 수익권일 때 과열 지표 체크
+            elif profit_rate > 0.5: 
+                if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
+                elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
+            
+            # 4. 전략 점수 급락
+            elif res['score'] < 3.5:
+                reason = f"📉점수하락({res['score']}점)"
+            
+            # 5. 이상 징후 (설거지 감지)
+            elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
+                reason = f"⚠️이상징후(설거지감지)"
 
-            # 매도 실행 로직
+            # --- [매도 실행] ---
             if reason and self.is_active:
                 print(f"👋 [매도 판단] {ticker} -> {reason}")
                 success = await self.executor.try_sell(trade_id, ticker, current, reason)
@@ -183,7 +184,6 @@ class TradeManager:
                     self.sell_timestamps[ticker] = time.time()
                     self.trailing_status.pop(ticker, None)
                     
-                    # 매도 성공 시 카테고리 초기화 (UI에서 '보유중' 태그 즉시 삭제됨)
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
@@ -193,7 +193,6 @@ class TradeManager:
         empty_slots = self.MAX_COIN_COUNT - active_cnt
         
         krw = self.executor.get_krw_balance()
-        # 예산 부족해도 분석은 돌아가야 하므로 여기서는 체크만 함
         can_buy = (empty_slots > 0) and (krw >= self.MIN_ORDER_KRW)
         
         budget = 0
@@ -201,29 +200,25 @@ class TradeManager:
             budget = (krw * 0.99) / empty_slots
             if budget < self.MIN_ORDER_KRW: budget = krw * 0.99
 
-        # --- [2] 종목 스캔 & 점수 업데이트 (항상 실행!) ---
+        # --- [2] 종목 스캔 & 점수 업데이트 ---
         candidates = []
         
-        # 타겟 코인들을 순회하며 점수 계산 (보유 여부 상관없이 UI 갱신을 위해)
         for ticker in self.target_coins:
-            # 쿨타임 & 보유중 체크 (매수 대상에서만 제외할 뿐, 점수는 계산해야 함)
             last_sell = self.sell_timestamps.get(ticker, 0)
             is_cooldown = (time.time() - last_sell < self.REBUY_COOLDOWN)
             is_holding = self._is_holding(ticker)
 
-            # 전략 분석
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
             if not is_real: continue
             
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             
-            # 🔥 [핵심] 여기서 상태를 업데이트해줘야 프론트엔드에 점수가 뜸
+            # UI용 상태 업데이트
             self._update_market_status(ticker, current, res)
             
-            # 매수 불가능한 상황이면 후보군 등록 스킵
             if not can_buy or is_holding or is_cooldown: continue
 
-            # --- 아래는 매수 후보 필터링 로직 ---
+            # --- 매수 후보 필터링 로직 ---
             res['ticker'] = ticker 
             res['current_price'] = current
 
@@ -231,8 +226,8 @@ class TradeManager:
             mfi = res.get('mfi', 50)
             score = res['score']
 
-            if rsi >= 70: continue        
-            if mfi >= 80: continue       
+            if rsi >= 70: continue         
+            if mfi >= 80: continue        
             if rsi >= 60 and mfi < 40: continue
             if score < 7.0: continue # 기준점
             
@@ -259,7 +254,7 @@ class TradeManager:
 
             candidates.append(res)
         
-        # --- [3] 실제 매수 실행 (살 수 있을 때만) ---
+        # --- [3] 실제 매수 실행 ---
         if candidates and can_buy:
             candidates.sort(key=lambda x: (x['score'], x['mfi']), reverse=True)
             final_picks = candidates[:empty_slots]
@@ -281,65 +276,48 @@ class TradeManager:
                         self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
                     await asyncio.sleep(0.2)
 
-    # -----------------------------------------------------------
-    # ✋ [신규] 수동 매매 기능 (프론트엔드 버튼 클릭 시 호출)
-    # -----------------------------------------------------------
     async def place_manual_buy(self, ticker, krw_amount):
         """수동 매수 (시장가)"""
         try:
-            # 1. 예산 확인
             current_krw = self.executor.get_krw_balance()
             if current_krw < krw_amount:
                 return {"status": "error", "message": f"잔액 부족 (보유: {current_krw:,.0f}원)"}
             
-            # 2. 현재가 조회 (기록용)
             current_price = pyupbit.get_current_price(ticker)
-            
-            # 3. 매수 실행 (전략명: Manual)
             success = await self.executor.try_buy(ticker, current_price, krw_amount, "Manual(수동)")
             
             if success:
-                # UI 즉시 반영
                 if ticker in self.market_status:
                     self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
-                self.update_frontend_cache() # 캐시 강제 갱신
+                self.update_frontend_cache()
                 return {"status": "success", "message": f"{ticker} 매수 성공!"}
             else:
                 return {"status": "error", "message": "API 매수 주문 실패"}
-                
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
     async def place_manual_sell(self, ticker):
         """수동 매도 (전량 시장가)"""
         try:
-            # 1. 보유량 확인
             balance = self.executor.get_coin_balance(ticker)
             if balance <= 0:
                 return {"status": "error", "message": "매도할 잔액이 없습니다."}
             
-            # 2. 현재가 조회 및 Trade ID 찾기 (DB 기록용)
             current_price = pyupbit.get_current_price(ticker)
-            trade_row = self.repo.get_open_trade(ticker) # (id, buy_price, ...) 가져오는 함수 필요
-            
-            # get_open_trade가 없으면 임시 처리 (TradeManager 로직상 repo 수정 필요할 수 있음)
-            # 여기서는 편의상 Executor가 알아서 처리하도록 위임
+            trade_row = self.repo.get_open_trade(ticker)
             trade_id = trade_row[0] if trade_row else 0
             
-            # 3. 매도 실행 (이유: Manual)
             success = await self.executor.try_sell(trade_id, ticker, current_price, "Manual(수동)")
             
             if success:
                 self.sell_timestamps[ticker] = time.time()
-                # UI 즉시 반영 (보유중 태그 삭제)
                 if ticker in self.market_status:
                     cat = self.market_status[ticker].get("category", "")
                     self.market_status[ticker]["category"] = cat.replace(" (보유중)", "")
-                self.update_frontend_cache() # 캐시 강제 갱신
+                self.update_frontend_cache()
                 return {"status": "success", "message": f"{ticker} 매도 성공!"}
             else:
                 return {"status": "error", "message": "API 매도 주문 실패"}
-                
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -347,7 +325,7 @@ class TradeManager:
         try:
             if not self.shared_data: return
             
-            # --- [1] 종목 선정 로직 (기존 동일) ---
+            # --- [1] 종목 선정 로직 ---
             MIN_TRADE_PRICE = 5_000_000_000 
             all_data = list(self.shared_data.items())
             sorted_by_vol = sorted(all_data, key=lambda x: x[1]['acc_trade_price_24h'], reverse=True)
@@ -373,7 +351,7 @@ class TradeManager:
                         targets_map[t] = "거래량 상위(보충)"
                         if len(targets_map) >= 10: break
 
-            # --- [2] 지갑 동기화 (기존 동일) ---
+            # --- [2] 지갑 동기화 ---
             try:
                 real_balances = await asyncio.to_thread(self.executor.get_all_balances)
                 db_trades = self.repo.get_open_trades() 
@@ -406,10 +384,9 @@ class TradeManager:
             except Exception as e:
                 print(f"Sync Error: {e}")
 
-            # --- [3] Market Status 업데이트 (🔥 핵심 수정 부분) ---
+            # --- [3] Market Status 업데이트 ---
             final_targets = list(targets_map.keys())
             
-            # 없는 가격 데이터 채워넣기
             missing_tickers = [t for t in final_targets if t not in self.shared_data]
             if missing_tickers:
                 try:
@@ -426,13 +403,12 @@ class TradeManager:
                 cached = self.backtester.get_analysis(ticker)
                 realtime_price = self.shared_data.get(ticker, {}).get('current_price', 0)
                 
-                # 🔥 [안전장치] 모든 필수 필드의 기본값을 미리 정의
                 base_data = {
                     "price": realtime_price,
                     "score": 0,
                     "reasons": [],
                     "target": 0,
-                    "rsi": 50,  # 기본값 50 (에러 방지용)
+                    "rsi": 50,
                     "mfi": 50,
                     "atr": 0,
                     "stop_loss_price": 0,
@@ -441,11 +417,9 @@ class TradeManager:
                     "category": targets_map.get(ticker, "관찰 종목")
                 }
                 
-                # 1. 기존 메모리에 있던 데이터 덮어쓰기 (화면 깜빡임 방지)
                 if existing:
                     base_data.update(existing)
                 
-                # 2. 백테스터 최신 분석 결과가 있으면 덮어쓰기
                 if cached:
                     base_data.update({
                         "score": cached.get('score', 0),
@@ -458,7 +432,6 @@ class TradeManager:
                         "score_breakdown": cached.get('score_breakdown', [])
                     })
                 
-                # 3. 실시간 변동 데이터(가격, 카테고리)는 무조건 최신으로
                 base_data["price"] = realtime_price
                 base_data["category"] = targets_map.get(ticker, "관찰 종목")
                 
@@ -472,6 +445,8 @@ class TradeManager:
     async def get_smart_candles(self, ticker):
         now = time.time()
         last_call = self.last_api_call_time.get(ticker, 0)
+        
+        # 🔥 [시스템최적화] API 호출 제한 (MIN_OHLCV_INTERVAL) 적용
         if now - last_call > self.MIN_OHLCV_INTERVAL or ticker not in self.cached_day_dfs:
             try:
                 df_day = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=60)
@@ -481,12 +456,14 @@ class TradeManager:
                     self.cached_min_dfs[ticker] = df_min if df_min is not None else df_day
                     self.last_api_call_time[ticker] = now
             except Exception as e:
+                # 🔥 [시스템최적화] 조용한 에러 방지 (로그 출력)
                 print(f"⚠️ [Candle Error] {ticker}: {e}")
         
         if ticker not in self.cached_day_dfs: return None, None, 0, False
         
-        df_day = self.cached_day_dfs[ticker]
-        df_min = self.cached_min_dfs[ticker]
+        # 🔥 [시스템최적화] 데이터 복사(copy) 대신 덮어쓰기 방식으로 최적화
+        df_day = self.cached_day_dfs[ticker].copy()
+        df_min = self.cached_min_dfs[ticker].copy()
         is_realtime = False
         current_price = 0
         
@@ -515,6 +492,7 @@ class TradeManager:
         for ticker in list(self.trailing_status.keys()):
             if ticker not in active_tickers: del self.trailing_status[ticker]
         
+        # 🔥 [시스템최적화] TTL 만료된 캐시 강제 삭제
         now = time.time()
         stale = [
             t for t, ts in self.last_api_call_time.items()
@@ -559,17 +537,14 @@ class TradeManager:
         return False
 
     def update_frontend_cache(self):
-        # 1. DB에서 보유 중인 코인 목록 가져오기
         open_trades = self.repo.get_open_trades() 
-        holdings_map = {t[1]: t[2] for t in open_trades} # {ticker: buy_price}
+        holdings_map = {t['ticker']: t['buy_price'] for t in open_trades}
 
         total_krw = 0
         total_coin_val = 0
         
         try:
             all_balances = self.executor.get_all_balances()
-            
-            # 검색하기 편하게 딕셔너리로 변환: {'KRW-BTC': 0.1, 'KRW': 10000, ...}
             balance_dict = {}
             for b in all_balances:
                 if b['currency'] == 'KRW':
@@ -578,17 +553,14 @@ class TradeManager:
                     ticker = f"KRW-{b['currency']}"
                     balance_dict[ticker] = float(b['balance']) + float(b['locked'])
 
-            # 계산
             for ticker in holdings_map.keys():
-                qty = balance_dict.get(ticker, 0) # API 호출 없이 메모리에서 조회
+                qty = balance_dict.get(ticker, 0)
                 current_price = self.shared_data.get(ticker, {}).get('current_price', 0)
                 total_coin_val += (qty * current_price)
                 
         except Exception as e:
-            # 네트워크 에러가 나도 봇이 죽지 않게 예외 처리
             print(f"⚠️ [Frontend Update Error] {e}")
 
-        # 리스트 구성
         items_list = []
         for ticker, data in self.market_status.items():
             item = data.copy()
