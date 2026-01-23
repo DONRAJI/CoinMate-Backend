@@ -159,19 +159,18 @@ class TradeManager:
                             f"피크-{drawdown_pct:.2f}%)"
                         )
             
-            if not reason:
-                # 2. 수익권일 때 과열 지표 체크
-                if profit_rate > 0.5: 
-                    if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
-                    elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
-                
-                # 3. 전략 점수 급락
-                elif res['score'] < 3.5:
-                    reason = f"📉점수하락({res['score']}점)"
-                
-                # 4. 이상 징후 (가격은 내렸는데 MFI만 비정상적으로 높거나 등등)
-                elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
-                    reason = f"⚠️이상징후(설거지감지)"
+            # 2. 수익권일 때 과열 지표 체크
+            elif profit_rate > 0.5: 
+                if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
+                elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
+            
+            # 3. 전략 점수 급락
+            elif res['score'] < 3.5:
+                reason = f"📉점수하락({res['score']}점)"
+            
+            # 4. 이상 징후 (가격은 내렸는데 MFI만 비정상적으로 높거나 등등)
+            elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
+                reason = f"⚠️이상징후(설거지감지)"
 
             # 매도 실행 로직
             if reason and self.is_active:
