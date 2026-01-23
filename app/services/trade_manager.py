@@ -33,13 +33,15 @@ class TradeManager:
         self.cached_min_dfs = {}
         self.last_api_call_time = {}
         self.sell_timestamps = {}
+        self.trailing_status = {}
         self.REBUY_COOLDOWN = 3600 
         
         # 설정값
         self.MAX_COIN_COUNT = 4 
         self.MIN_ORDER_KRW = 6000
-        self.PROFIT_TARGET = 3.5
-        self.STOP_LOSS = -2.0
+        self.TRAILING_START = 2.0
+        self.TRAILING_CALLBACK = 1.0
+        self.STOP_LOSS = -3.0
         
         self.STRATEGY_MAP = {
             "trend": "추세", "volume": "거래량폭발", "stoch": "골든크로스",
@@ -140,11 +142,22 @@ class TradeManager:
             self._update_market_status(ticker, current, res)
 
             reason = ""
-            # 1. 익절/손절 기준 (최우선)
-            if profit_rate >= self.PROFIT_TARGET:
-                reason = f"💰익절달성({profit_rate:.2f}%)"
-            elif profit_rate <= self.STOP_LOSS:
+            # 1. 손절 기준 (최우선)
+            if profit_rate <= self.STOP_LOSS:
                 reason = f"💧손절방어({profit_rate:.2f}%)"
+            else:
+                peak_price = self.trailing_status.get(ticker, buy_price)
+                if current > peak_price:
+                    peak_price = current
+                    self.trailing_status[ticker] = peak_price
+
+                if profit_rate >= self.TRAILING_START:
+                    drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
+                    if drawdown_pct >= self.TRAILING_CALLBACK:
+                        reason = (
+                            f"📉트레일링스탑({profit_rate:.2f}%, "
+                            f"피크-{drawdown_pct:.2f}%)"
+                        )
             
             # 2. 수익권일 때 과열 지표 체크
             elif profit_rate > 0.5: 
@@ -165,6 +178,7 @@ class TradeManager:
                 success = await self.executor.try_sell(trade_id, ticker, current, reason)
                 if success:
                     self.sell_timestamps[ticker] = time.time()
+                    self.trailing_status.pop(ticker, None)
                     
                     # 매도 성공 시 카테고리 초기화 (UI에서 '보유중' 태그 즉시 삭제됨)
                     if ticker in self.market_status:
@@ -218,6 +232,27 @@ class TradeManager:
             if mfi >= 80: continue       
             if rsi >= 60 and mfi < 40: continue
             if score < 7.0: continue # 기준점
+            
+            # 🚫 Filter: Shooting Star Detected (Upper Wick > Body * 2)
+            last_open = df_min['open'].iloc[-1]
+            last_close = df_min['close'].iloc[-1]
+            last_high = df_min['high'].iloc[-1]
+            last_low = df_min['low'].iloc[-1]
+            body_size = abs(last_close - last_open)
+            upper_wick = last_high - max(last_open, last_close)
+            if body_size > 0 and upper_wick > (body_size * 2):
+                continue
+
+            # 🚫 Filter: Low Volume Pump (Price up > 3% but Volume below MA20)
+            volume_ma20 = df_min['volume'].rolling(20).mean().iloc[-1]
+            price_change_pct = ((last_close - last_open) / last_open) * 100 if last_open > 0 else 0
+            if price_change_pct > 3 and df_min['volume'].iloc[-1] < volume_ma20:
+                continue
+
+            # 🚫 Filter: Extreme Volatility (Range > 10% of Open)
+            price_range_pct = ((last_high - last_low) / last_open) * 100 if last_open > 0 else 0
+            if price_range_pct > 10:
+                continue
 
             candidates.append(res)
         
@@ -469,6 +504,8 @@ class TradeManager:
             if ticker not in active_tickers: del self.cached_min_dfs[ticker]
         for ticker in list(self.last_api_call_time.keys()):
             if ticker not in active_tickers: del self.last_api_call_time[ticker]
+        for ticker in list(self.trailing_status.keys()):
+            if ticker not in active_tickers: del self.trailing_status[ticker]
         
         now = time.time()
         expired = [t for t, ts in self.sell_timestamps.items() if now - ts > self.REBUY_COOLDOWN]
