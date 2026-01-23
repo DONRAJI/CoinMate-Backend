@@ -20,7 +20,7 @@ class Strategy:
             "vwap": 1.5,        
 
             # --- [C] 반전/타이밍 그룹 (Oscillators) ---
-            # RSI, MFI, CCI, Stoch는 성격이 비슷하므로 묶어서 관리합니다.
+            # RSI, MFI만 사용해 중복을 줄이고 신뢰도 높은 신호에 집중합니다.
             # 이 그룹은 내부적으로 평균을 내어 최대 3.0점만 반영합니다.
             "oscillator_group": 3.0, 
             
@@ -64,9 +64,6 @@ class Strategy:
         # 개별 오실레이터 계산
         rsi_val = self._calc_rsi_pandas(closes).iloc[-1]
         mfi_val = self._calc_mfi_pandas(highs, lows, closes, volumes).iloc[-1]
-        stoch_signal = self._get_stochastic_signal(df_min)
-        cci_signal = self._calc_cci(highs, lows, closes)
-        
         # 기타 지표
         vwap_signal = self._calc_vwap_signal(df_min)
         bollinger_score = self._sig_bollinger(closes, opens)
@@ -76,9 +73,8 @@ class Strategy:
         macd_score = self._calc_macd_score(closes)
 
         # --- 3. 오실레이터 그룹 점수 통합 (핵심 변경 사항) ---
-        # 비슷하게 움직이는 지표들을 모아서 '하나의 의견'으로 만듭니다.
+        # RSI/MFI만 사용하여 중복 신호를 줄이고 평균으로 그룹 점수를 계산합니다.
         # 각각 1점(긍정), 0점(중립), -1점(부정) 부여 후 평균 계산
-        
         osc_scores = []
         
         # RSI (35이하 매수, 65이상 매도 - 기준 약간 완화)
@@ -86,19 +82,13 @@ class Strategy:
         elif rsi_val > 65: osc_scores.append(-1)
         else: osc_scores.append(0)
 
-        # MFI (20이하 매수, 80이상 매도)
-        if mfi_val < 20: osc_scores.append(1)
+        # MFI (25이하 매수, 80이상 매도)
+        if mfi_val < 25: osc_scores.append(1)
         elif mfi_val > 80: osc_scores.append(-1)
         else: osc_scores.append(0)
-        
-        # CCI (-100 상향 돌파)
-        osc_scores.append(1 if cci_signal == 1 else 0)
-        
-        # Stochastic (골든크로스)
-        osc_scores.append(1 if stoch_signal else 0)
 
         # 오실레이터 종합 점수 (-1.0 ~ 1.0 사이의 비율)
-        # 예: 4개 중 3개가 좋으면 0.75, 4개가 다 나쁘면 -1.0
+        # 예: 2개 중 2개가 좋으면 1.0, 1개만 좋으면 0.5
         osc_ratio = sum(osc_scores) / len(osc_scores) if osc_scores else 0
         
         # 최종 점수에 반영될 오실레이터 점수 (최대 3.0점)
@@ -115,8 +105,6 @@ class Strategy:
             "volume": vol_signal,
             "vwap": vwap_signal,
             "bollinger": bollinger_score,
-            "stoch": 1 if stoch_signal else 0,
-            "cci": cci_signal,
             "macd": macd_score,
             "rsi": self._eval_rsi(rsi_val),
             "mfi": self._eval_mfi(mfi_val),
@@ -248,25 +236,6 @@ class Strategy:
             return 1
         return 0
 
-    def _get_stochastic_signal(self, df, n=14, k=3):
-        """골든크로스 AND 적정 구간(20~60) 진입"""
-        if len(df) < n: return False
-        
-        low_min = df['low'].rolling(n).min()
-        high_max = df['high'].rolling(n).max()
-        denominator = (high_max - low_min).replace(0, 0.0001)
-        
-        fast_k = ((df['close'] - low_min) / denominator) * 100
-        slow_k = fast_k.rolling(k).mean()
-        slow_d = slow_k.rolling(k).mean()
-        
-        if pd.isna(slow_k.iloc[-1]) or pd.isna(slow_d.iloc[-1]): return False
-        
-        curr_k = slow_k.iloc[-1]
-        curr_d = slow_d.iloc[-1]
-        
-        return (curr_k > curr_d) and (20 <= curr_k <= 60)
-
     def _sig_bollinger(self, closes, opens, period=20, k=2, threshold=1.02):
         """밴드 하단 터치 + 양봉 반등 확인"""
         if len(closes) < period: return 0
@@ -295,23 +264,6 @@ class Strategy:
             return 1
         if curr_price >= curr_upper:
             return -1
-        return 0
-
-    def _calc_cci(self, highs, lows, closes, period=20):
-        """CCI: -100 상향 돌파 시 매수"""
-        tp = (highs + lows + closes) / 3
-        ma = tp.rolling(period).mean()
-        mad = (tp - ma).abs().rolling(period).mean().replace(0, 0.0001)
-        
-        cci = (tp - ma) / (0.015 * mad)
-        
-        if len(cci) < 2: return 0
-        
-        prev_cci = cci.iloc[-2]
-        curr_cci = cci.iloc[-1]
-        
-        if prev_cci < -100 and curr_cci > -100:
-            return 1
         return 0
 
     def _calc_vwap_signal(self, df):
