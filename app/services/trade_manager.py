@@ -118,20 +118,17 @@ class TradeManager:
     async def process_selling(self):
         """
         [수정 내역]
-        기존: for trade_id, ticker, buy_price, _, _ in open_trades: (개수 안 맞으면 에러남)
-        변경: for trade in open_trades: ... trade['id'] (이름으로 찾으므로 안전함)
+        기존: for trade_id, ticker, buy_price, _, _ in open_trades:
+        변경: for trade in open_trades: ... trade['id']
         """
         open_trades = self.repo.get_open_trades()
         
-        # 🔥 [핵심 수정] 리스트에서 객체 하나(trade)를 통째로 가져옵니다.
         for trade in open_trades:
-            # 🔥 [핵심 수정] 순서가 아니라 '이름'으로 값을 꺼냅니다. (DB 컬럼이 늘어나도 안전)
-            # 주의: TradeRepository의 get_conn에서 row_factory = sqlite3.Row 설정이 되어 있어야 작동합니다.
             trade_id = trade['id']
             ticker = trade['ticker']
             buy_price = trade['buy_price']
             
-            # --- 아래부터는 기존 로직과 동일 ---
+            # 캔들 데이터 조회
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
             if not is_real or current == 0: continue
 
@@ -141,46 +138,53 @@ class TradeManager:
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             self._update_market_status(ticker, current, res)
 
+            # --- [매도 로직 시작] ---
+            
+            # 0. 최고가(Peak) 업데이트 (매도 판단 전에 무조건 실행)
+            # 트레일링 스탑을 위해 현재 가격이 기록된 최고가보다 높으면 갱신
+            peak_price = self.trailing_status.get(ticker, buy_price)
+            if current > peak_price:
+                peak_price = current
+                self.trailing_status[ticker] = peak_price
+
             reason = ""
-            # 1. 손절 기준 (최우선)
+
+            # 1. 손절 기준 (Stop Loss) - 최우선
             if profit_rate <= self.STOP_LOSS:
                 reason = f"💧손절방어({profit_rate:.2f}%)"
-            else:
-                peak_price = self.trailing_status.get(ticker, buy_price)
-                if current > peak_price:
-                    peak_price = current
-                    self.trailing_status[ticker] = peak_price
 
-                if profit_rate >= self.TRAILING_START:
-                    drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
-                    if drawdown_pct >= self.TRAILING_CALLBACK:
-                        reason = (
-                            f"📉트레일링스탑({profit_rate:.2f}%, "
-                            f"피크-{drawdown_pct:.2f}%)"
-                        )
+            # 2. 트레일링 스탑 (Trailing Stop)
+            elif profit_rate >= self.TRAILING_START:
+                drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
+                if drawdown_pct >= self.TRAILING_CALLBACK:
+                    reason = (
+                        f"📉트레일링스탑({profit_rate:.2f}%, "
+                        f"피크-{drawdown_pct:.2f}%)"
+                    )
             
-            # 2. 수익권일 때 과열 지표 체크
+            # 3. 수익권일 때 과열 지표 체크
             elif profit_rate > 0.5: 
                 if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
                 elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
             
-            # 3. 전략 점수 급락
+            # 4. 전략 점수 급락
             elif res['score'] < 3.5:
                 reason = f"📉점수하락({res['score']}점)"
             
-            # 4. 이상 징후 (가격은 내렸는데 MFI만 비정상적으로 높거나 등등)
+            # 5. 이상 징후 (설거지 감지)
             elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
                 reason = f"⚠️이상징후(설거지감지)"
 
-            # 매도 실행 로직
+            # --- [매도 실행] ---
             if reason and self.is_active:
                 print(f"👋 [매도 판단] {ticker} -> {reason}")
                 success = await self.executor.try_sell(trade_id, ticker, current, reason)
                 if success:
                     self.sell_timestamps[ticker] = time.time()
+                    # 매도했으므로 트레일링 스탑 기록 삭제
                     self.trailing_status.pop(ticker, None)
                     
-                    # 매도 성공 시 카테고리 초기화 (UI에서 '보유중' 태그 즉시 삭제됨)
+                    # 매도 성공 시 카테고리 초기화
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
@@ -602,5 +606,6 @@ class TradeManager:
                 "coin_value": total_coin_val
             }
         }
+
 
 trade_manager = TradeManager()
