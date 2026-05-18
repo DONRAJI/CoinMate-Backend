@@ -285,7 +285,8 @@ class Strategy:
 
     def _calc_atr_pandas(self, highs, lows, closes, period=14):
         tr = self._calc_atr_series(highs, lows, closes)
-        return tr.rolling(period).mean().iloc[-1] if not pd.isna(tr.iloc[-1]) else 0
+        result = tr.rolling(period).mean().iloc[-1]
+        return 0 if pd.isna(result) else result
 
     def _calc_macd_score(self, closes):
         exp1 = closes.ewm(span=12, adjust=False).mean()

@@ -158,6 +158,7 @@ class TradeManager:
             drawdown_from_high = ((high - current) / high) * 100 if high > 0 else 0
 
             res = self.strategy.get_ensemble_signal(df_day, df_min)
+            if not res: continue
             self._update_market_status(ticker, current, res)
 
             is_strong_trend = res['strategies'].get('adx', 0) == 1
@@ -296,6 +297,8 @@ class TradeManager:
                 return {"status": "error", "message": f"잔액 부족 (보유: {current_krw:,.0f}원)"}
             
             current_price = pyupbit.get_current_price(ticker)
+            if not current_price:
+                return {"status": "error", "message": f"{ticker} 시세 조회 실패"}
             success = await self.executor.try_buy(ticker, current_price, krw_amount, "Manual(수동)")
             
             if success:
@@ -316,9 +319,13 @@ class TradeManager:
                 return {"status": "error", "message": "매도할 잔액이 없습니다."}
             
             current_price = pyupbit.get_current_price(ticker)
+            if not current_price:
+                return {"status": "error", "message": f"{ticker} 시세 조회 실패"}
             trade_row = self.repo.get_open_trade(ticker)
-            trade_id = trade_row[0] if trade_row else 0
-            
+            if not trade_row:
+                return {"status": "error", "message": f"{ticker} 보유 기록을 찾을 수 없습니다."}
+            trade_id = trade_row['id']
+
             success = await self.executor.try_sell(trade_id, ticker, current_price, "Manual(수동)")
             
             if success:
@@ -403,7 +410,8 @@ class TradeManager:
             if missing_tickers:
                 try:
                     prices = await asyncio.to_thread(pyupbit.get_current_price, missing_tickers)
-                    if isinstance(prices, (float, int)): prices = {missing_tickers[0]: prices}
+                    if prices is None: prices = {}
+                    elif isinstance(prices, (float, int)): prices = {missing_tickers[0]: prices}
                     for t, p in prices.items():
                         self.shared_data[t] = {"current_price": float(p), "acc_trade_price_24h": 0}
                 except Exception as e:
@@ -480,8 +488,8 @@ class TradeManager:
         current_price = 0
         
         if self.shared_data and ticker in self.shared_data:
-            current_price = self.shared_data[ticker]['current_price']
-            is_realtime = True
+            current_price = self.shared_data[ticker].get('current_price', 0)
+            is_realtime = current_price > 0
             
         if is_realtime and current_price > 0:
             if 'close' in df_day.columns:
@@ -557,8 +565,6 @@ class TradeManager:
         
         try:
             all_balances = self.executor.get_all_balances()
-            if not isinstance(all_balances, list):
-                raise ValueError(f"API 응답 오류: {all_balances}")
             balance_dict = {}
             for b in all_balances:
                 if b['currency'] == 'KRW':
@@ -585,7 +591,7 @@ class TradeManager:
                 item['reasons'] = active_reasons
 
             if self.shared_data and ticker in self.shared_data:
-                item['price'] = self.shared_data[ticker]['current_price']
+                item['price'] = self.shared_data[ticker].get('current_price', 0)
             
             if ticker in holdings_map:
                 buy_price = holdings_map[ticker]

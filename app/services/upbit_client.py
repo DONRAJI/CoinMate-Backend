@@ -52,7 +52,8 @@ class UpbitClient:
     def get_balances(self):
         """전체 계좌 잔고 조회 (동기화용)"""
         if not self.upbit: return []
-        return self.upbit.get_balances()
+        result = self.upbit.get_balances()
+        return result if isinstance(result, list) else []
 
     def buy_market_order(self, ticker, price):
         if not self.upbit: return None
