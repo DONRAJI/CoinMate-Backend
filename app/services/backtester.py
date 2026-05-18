@@ -170,13 +170,12 @@ class Backtester:
             max_balance = capital
             mdd = 0
 
-            PROFIT_TARGET = 3.5
-            STOP_LOSS = -2.0
             TRAILING_ACT = 2.0
             TRAILING_DIST = 1.5
 
             days_to_test = min(90, len(df) - 20)
             start_idx = len(df) - days_to_test
+            days_held = 0
 
             for i in range(start_idx, len(df) - 1):
                 past = df.iloc[:i+1]
@@ -189,19 +188,27 @@ class Backtester:
                 mfi = float(res.get('mfi', 50))
                 score = float(res['score'])
                 is_strong_trend = res['strategies'].get('adx', 0) == 1
+                regime = res.get('regime', 'normal')
+                is_sideways = regime == 'sideways'
+
+                stop_loss = -1.5 if is_sideways else -2.0
+                profit_target = 2.0 if is_sideways else 3.5
 
                 # 매도 판단
                 if shares > 0:
+                    days_held += 1
                     profit = ((price - avg_buy) / avg_buy) * 100
                     high_since_buy = max(high_since_buy, price)
                     dd_from_high = ((high_since_buy - price) / high_since_buy) * 100
 
                     sell = False
-                    if profit <= STOP_LOSS:
+                    if profit <= stop_loss:
                         sell = True
                     elif is_strong_trend and profit >= TRAILING_ACT and dd_from_high >= TRAILING_DIST:
                         sell = True
-                    elif not is_strong_trend and profit >= PROFIT_TARGET:
+                    elif not is_strong_trend and profit >= profit_target:
+                        sell = True
+                    elif is_sideways and days_held >= 2 and profit < 1.0:
                         sell = True
                     elif profit > 0.5 and (rsi >= 80 or mfi >= 85):
                         sell = True
@@ -214,6 +221,7 @@ class Backtester:
                         if pnl > 0: win_count += 1
                         balance = sell_val
                         shares = 0
+                        days_held = 0
                         trade_count += 1
                         max_balance = max(max_balance, balance)
                         dd = (max_balance - balance) / max_balance * 100
@@ -226,6 +234,7 @@ class Backtester:
                     balance = 0
                     avg_buy = next_open
                     high_since_buy = next_open
+                    days_held = 0
 
             final = balance if balance > 0 else shares * float(df.iloc[-1]['close'])
             return {

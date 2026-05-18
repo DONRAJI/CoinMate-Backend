@@ -32,10 +32,13 @@ class Strategy:
         ma20_day = day_close.rolling(window=20).mean().iloc[-1]
         current_price = day_close.iloc[-1]
         
-        # 추세 신호 (Trend): 패널티 방식 삭제 -> 점수 획득 방식으로 변경
         is_bull_market = current_price >= ma20_day
-        adx_signal = self._calc_adx(df_day)
+        adx_value, adx_bullish = self._calc_adx_detail(df_day)
         vol_signal = self._get_volume_signal(df_day)
+
+        # 시장 레짐 판별
+        is_trending = adx_value >= 25
+        is_sideways = adx_value < 20
 
         # (2) 분봉 분석
         closes = df_min['close']
@@ -80,7 +83,8 @@ class Strategy:
         total_score = 0
         logs = []
         
-        # 개별 전략 신호 맵 (디버깅/UI 표시용)
+        adx_signal = 1 if (adx_value >= 20 and adx_bullish) else 0
+
         strategies_map = {
             "trend": 1 if is_bull_market else -1,
             "adx": adx_signal,
@@ -92,24 +96,36 @@ class Strategy:
             "mfi": self._eval_mfi(mfi_val),
         }
 
-        # (A) 추세
+        regime = "trending" if is_trending else ("sideways" if is_sideways else "normal")
+
+        # (A) 추세 — ADX 연동 가변 가중치
         if is_bull_market:
-            total_score += self.WEIGHTS["trend"]
-            if debug: logs.append(f"[Trend] 상승 추세 (+{self.WEIGHTS['trend']})")
+            if is_trending:
+                trend_pts = self.WEIGHTS["trend"]
+            elif is_sideways:
+                trend_pts = 0.5
+            else:
+                trend_pts = 1.5
+            # 거래량 미확인 상승은 신뢰도 감소
+            if not vol_signal:
+                trend_pts *= 0.7
+            total_score += trend_pts
+            if debug: logs.append(f"[Trend] 상승 추세 (+{trend_pts:.1f}, ADX:{adx_value:.0f}, 레짐:{regime})")
         else:
-            if debug: logs.append(f"[Trend] 하락 추세 (0.0)")
+            if debug: logs.append(f"[Trend] 하락 추세 (0.0, ADX:{adx_value:.0f})")
 
         # (B) ADX
         if adx_signal:
             total_score += self.WEIGHTS["adx"]
             if debug: logs.append(f"[ADX] 강한 추세 (+{self.WEIGHTS['adx']})")
 
-        # (C) MACD
+        # (C) MACD — 횡보장에서 가중치 감소
+        macd_weight = self.WEIGHTS["macd"] if not is_sideways else self.WEIGHTS["macd"] * 0.5
         if macd_score == 1:
-            total_score += self.WEIGHTS["macd"]
-            if debug: logs.append(f"[MACD] 상승 모멘텀 (+{self.WEIGHTS['macd']})")
+            total_score += macd_weight
+            if debug: logs.append(f"[MACD] 상승 모멘텀 (+{macd_weight:.1f})")
         elif macd_score == -1:
-            deduction = self.WEIGHTS["macd"] * 0.3
+            deduction = macd_weight * 0.3
             total_score -= deduction
             if debug: logs.append(f"[MACD] 하락 모멘텀 (-{deduction:.2f})")
 
@@ -126,10 +142,11 @@ class Strategy:
             total_score -= deduction
             if debug: logs.append(f"[Oscillators] 과열 신호 (-{deduction:.2f})")
 
-        # (F) 볼린저 밴드
+        # (F) 볼린저 밴드 — 횡보장에서 가중치 상향
+        bb_weight = 2.5 if is_sideways else self.WEIGHTS["bollinger"]
         if bollinger_score == 1:
-            total_score += self.WEIGHTS["bollinger"]
-            if debug: logs.append(f"[Bollinger] 반등 유력 (+{self.WEIGHTS['bollinger']})")
+            total_score += bb_weight
+            if debug: logs.append(f"[Bollinger] 반등 유력 (+{bb_weight:.1f}, {'횡보가산' if is_sideways else '기본'})")
         elif bollinger_score == -1:
             total_score -= 0.75
 
@@ -161,6 +178,8 @@ class Strategy:
             "atr": round(atr_value, 0),
             "rsi": float(rsi_val),
             "mfi": float(mfi_val),
+            "adx": round(adx_value, 1),
+            "regime": regime,
             "strategies": strategies_map,
             "score_breakdown": logs
         }
@@ -169,43 +188,40 @@ class Strategy:
     #  Logic Methods (Indicators) - 기존 코드 유지
     # =========================================================
 
-    def _calc_adx(self, df, n=14):
-        """ADX: 추세 강도(20이상) AND 상승 추세(PDI > MDI) 확인"""
-        if len(df) < n * 2: return 0
-        
+    def _calc_adx_detail(self, df, n=14):
+        """ADX 상세: (adx값, pdi>mdi 여부) 튜플 반환"""
+        if len(df) < n * 2: return 0, False
+
         high = df['high']
         low = df['low']
         close = df['close']
-        
+
         up_move = high.diff()
         down_move = -low.diff()
-        
+
         pdm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         mdm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
+
         pdm = pd.Series(pdm, index=df.index)
         mdm = pd.Series(mdm, index=df.index)
-        
+
         tr = self._calc_atr_series(high, low, close)
-        
+
         tr_smooth = tr.ewm(alpha=1/n, min_periods=n).mean().replace(0, 0.0001)
         pdm_smooth = pdm.ewm(alpha=1/n, min_periods=n).mean()
         mdm_smooth = mdm.ewm(alpha=1/n, min_periods=n).mean()
-        
+
         pdi = 100 * (pdm_smooth / tr_smooth)
         mdi = 100 * (mdm_smooth / tr_smooth)
-        
+
         div = (pdi + mdi).replace(0, 0.0001)
         dx = (abs(pdi - mdi) / div) * 100
         adx = dx.ewm(alpha=1/n, min_periods=n).mean()
-        
-        curr_adx = adx.iloc[-1]
-        curr_pdi = pdi.iloc[-1]
-        curr_mdi = mdi.iloc[-1]
-        
-        if curr_adx >= 20 and curr_pdi > curr_mdi:
-            return 1
-        return 0
+
+        curr_adx = float(adx.iloc[-1])
+        is_bullish = pdi.iloc[-1] > mdi.iloc[-1]
+
+        return curr_adx, is_bullish
 
     def _get_volume_signal(self, df):
         """거래량 폭발 AND 양봉(Close > Open) 확인"""

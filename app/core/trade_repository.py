@@ -11,7 +11,7 @@ class TradeRepository:
     def get_open_trades(self):
         with self.get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, ticker, buy_price, buy_amount, strategy_name FROM trades WHERE status='open'")
+            cursor.execute("SELECT id, ticker, buy_price, buy_amount, buy_time, strategy_name FROM trades WHERE status='open'")
             return cursor.fetchall() # 이제 Row 객체 리스트 반환
 
     def get_trade_count(self):

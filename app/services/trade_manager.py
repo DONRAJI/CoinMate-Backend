@@ -162,30 +162,58 @@ class TradeManager:
             self._update_market_status(ticker, current, res)
 
             is_strong_trend = res['strategies'].get('adx', 0) == 1
+            regime = res.get('regime', 'normal')
+            is_sideways = regime == 'sideways'
+
+            # 레짐별 매도 파라미터
+            if is_sideways:
+                stop_loss = -1.5
+                profit_target = 2.0
+            else:
+                stop_loss = self.STOP_LOSS
+                profit_target = self.PROFIT_TARGET
+
+            # 보유 시간 계산 (시간 기반 탈출용)
+            bought_at = trade['buy_time'] if 'buy_time' in trade.keys() else None
+            holding_hours = 0
+            if bought_at:
+                try:
+                    from datetime import datetime as dt
+                    if isinstance(bought_at, str):
+                        bought_time = dt.fromisoformat(bought_at)
+                    else:
+                        bought_time = bought_at
+                    holding_hours = (dt.now() - bought_time).total_seconds() / 3600
+                except Exception:
+                    pass
 
             reason = ""
             # 1. 손절 (최우선)
-            if profit_rate <= self.STOP_LOSS:
-                reason = f"손절방어({profit_rate:.2f}%)"
+            if profit_rate <= stop_loss:
+                reason = f"손절방어({profit_rate:.2f}%,{regime})"
 
             # 2. 트레일링 스탑 (강한 추세일 때만)
             elif is_strong_trend and profit_rate >= self.TRAILING_ACTIVATION and drawdown_from_high >= self.TRAILING_DISTANCE:
                 reason = f"트레일링({profit_rate:.2f}%,고점대비-{drawdown_from_high:.1f}%)"
 
-            # 3. 고정 익절 (추세 약할 때)
-            elif not is_strong_trend and profit_rate >= self.PROFIT_TARGET:
-                reason = f"익절달성({profit_rate:.2f}%)"
+            # 3. 익절 (레짐별 목표가 다름)
+            elif not is_strong_trend and profit_rate >= profit_target:
+                reason = f"익절달성({profit_rate:.2f}%,{regime})"
 
-            # 4. 수익권 과열 체크
+            # 4. 횡보장 시간 기반 탈출: 48시간 보유 + 수익 < 1%
+            elif is_sideways and holding_hours >= 48 and profit_rate < 1.0:
+                reason = f"횡보탈출({holding_hours:.0f}h,{profit_rate:.2f}%)"
+
+            # 5. 수익권 과열 체크
             elif profit_rate > 0.5:
                 if res['rsi'] >= 80: reason = f"RSI과열({profit_rate:.2f}%)"
                 elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
 
-            # 5. 전략 점수 급락
+            # 6. 전략 점수 급락
             elif res['score'] < 3.5:
                 reason = f"점수하락({res['score']}점)"
 
-            # 6. 이상 징후
+            # 7. 이상 징후
             elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
                 reason = f"이상징후(설거지감지)"
 
