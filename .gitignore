@@ -14,6 +14,9 @@ cache/
 *.db
 *.sqlite3
 
-# 5. OS 생성 파일 (맥/윈도우 썸네일 등)
+# 5. 로그 파일
+logs/
+
+# 6. OS 생성 파일 (맥/윈도우 썸네일 등)
 .DS_Store
 Thumbs.db

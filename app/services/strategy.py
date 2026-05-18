@@ -4,34 +4,17 @@ import numpy as np
 
 class Strategy:
     def __init__(self):
-        # 📊 [리밸런싱] 지표 간 상관관계를 고려한 가중치 재설정
-        # 총점: 12.0점 만점
+        # 총점: 13.5점 만점 (백테스트 검증 완료)
         self.WEIGHTS = {
-            # --- [A] 추세 그룹 (Trend & Momentum) ---
-            # 가격이 20MA 위에 있는가? (가장 중요)
-            "trend": 3.0,       
-            # 추세의 강도가 센가?
-            "adx": 1.5,         
-            
-            # --- [B] 수급 그룹 (Volume & VWAP) ---
-            # 거래량이 터졌는가?
-            "volume": 1.0,      
-            # 세력 평단가 위에 있는가?
-            "vwap": 1.5,        
-
-            # --- [C] 반전/타이밍 그룹 (Oscillators) ---
-            # RSI, MFI만 사용해 중복을 줄이고 신뢰도 높은 신호에 집중합니다.
-            # 이 그룹은 내부적으로 평균을 내어 최대 3.0점만 반영합니다.
-            "oscillator_group": 3.0, 
-            
-            # --- [D] 변동성 그룹 (Volatility) ---
-            # 볼린저 밴드 하단 반등 (역추세 매매 핵심)
-            "bollinger": 2.0,   
+            "trend": 2.5,            # MA20 추세 방향
+            "adx": 1.5,              # 추세 강도
+            "macd": 2.5,             # 모멘텀 (골든크로스)
+            "volume": 1.5,           # 거래량 폭발
+            "vwap": 1.0,             # 세력 평단가
+            "oscillator_group": 3.0, # RSI/MFI 통합
+            "bollinger": 1.5,        # 밴드 반등
         }
-        
-        # 매수 기준: 7.0 (확실할 때 진입)
-        # 매도 기준: TradeManager에서 3.5 미만일 때 매도로 처리됨
-        self.BUY_THRESHOLD = 7.0 
+        self.BUY_THRESHOLD = 7.5
 
     def get_ensemble_signal(self, df_day: pd.DataFrame, df_min: pd.DataFrame = None, debug=False):
         """
@@ -69,7 +52,6 @@ class Strategy:
         bollinger_score = self._sig_bollinger(closes, opens)
         atr_value = self._calc_atr_pandas(highs, lows, closes)
         
-        # 기존 MACD 계산 (참고용)
         macd_score = self._calc_macd_score(closes)
 
         # --- 3. 오실레이터 그룹 점수 통합 (핵심 변경 사항) ---
@@ -110,39 +92,46 @@ class Strategy:
             "mfi": self._eval_mfi(mfi_val),
         }
 
-        # (A) 추세 (Trend): 3.0점
+        # (A) 추세
         if is_bull_market:
             total_score += self.WEIGHTS["trend"]
-            if debug: logs.append(f"✅ [Trend] 상승 추세 (+{self.WEIGHTS['trend']})")
+            if debug: logs.append(f"[Trend] 상승 추세 (+{self.WEIGHTS['trend']})")
         else:
-            # 패널티를 주는 대신 점수를 안 줌 (0점) -> 급격한 점수 하락 방지
-            if debug: logs.append(f"📉 [Trend] 하락 추세 (0.0)")
+            if debug: logs.append(f"[Trend] 하락 추세 (0.0)")
 
         # (B) ADX
         if adx_signal:
             total_score += self.WEIGHTS["adx"]
-            if debug: logs.append(f"✅ [ADX] 강한 추세 (+{self.WEIGHTS['adx']})")
+            if debug: logs.append(f"[ADX] 강한 추세 (+{self.WEIGHTS['adx']})")
 
-        # (C) 거래량 & VWAP
+        # (C) MACD
+        if macd_score == 1:
+            total_score += self.WEIGHTS["macd"]
+            if debug: logs.append(f"[MACD] 상승 모멘텀 (+{self.WEIGHTS['macd']})")
+        elif macd_score == -1:
+            deduction = self.WEIGHTS["macd"] * 0.3
+            total_score -= deduction
+            if debug: logs.append(f"[MACD] 하락 모멘텀 (-{deduction:.2f})")
+
+        # (D) 거래량 & VWAP
         if vol_signal: total_score += self.WEIGHTS["volume"]
         if vwap_signal: total_score += self.WEIGHTS["vwap"]
 
-        # (D) 오실레이터 그룹 (통합 점수)
+        # (E) 오실레이터 그룹
         if final_osc_score > 0:
             total_score += final_osc_score
-            if debug: logs.append(f"✅ [Oscillators] 바닥/반전 신호 종합 (+{final_osc_score:.2f})")
+            if debug: logs.append(f"[Oscillators] 반전 신호 (+{final_osc_score:.2f})")
         elif final_osc_score < 0:
-            # 매도 신호가 강할 경우 점수 차감 (절반 정도만 반영)
-            deduction = abs(final_osc_score) * 0.5 
+            deduction = abs(final_osc_score) * 0.5
             total_score -= deduction
-            if debug: logs.append(f"🔻 [Oscillators] 과열/매도 신호 종합 (-{deduction:.2f})")
+            if debug: logs.append(f"[Oscillators] 과열 신호 (-{deduction:.2f})")
 
-        # (E) 볼린저 밴드 (역추세 매매의 핵심)
+        # (F) 볼린저 밴드
         if bollinger_score == 1:
             total_score += self.WEIGHTS["bollinger"]
-            if debug: logs.append(f"🔥 [Bollinger] 반등 유력 (+{self.WEIGHTS['bollinger']})")
-        elif bollinger_score == -1: # 상단 터치
-            total_score -= 1.0 # 소폭 차감
+            if debug: logs.append(f"[Bollinger] 반등 유력 (+{self.WEIGHTS['bollinger']})")
+        elif bollinger_score == -1:
+            total_score -= 0.75
 
         final_score = round(max(0, total_score), 2)
 
@@ -159,7 +148,7 @@ class Strategy:
                 print(log)
             print("-" * 60)
             print(f" 🔍 RSI: {rsi_val:.1f} | MFI: {mfi_val:.1f} | Osc_Ratio: {osc_ratio:.2f}")
-            print(f" 🏆 최종 점수: {final_score} / 12.0 (매수 기준: {self.BUY_THRESHOLD})")
+            print(f" 🏆 최종 점수: {final_score} / 13.5 (매수 기준: {self.BUY_THRESHOLD})")
             print(f" 🚦 판단: {'BUY 🚀' if final_score >= self.BUY_THRESHOLD else 'WAIT ✋'}")
             print("="*60 + "\n")
 

@@ -41,4 +41,4 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print(f">>> 💾 DB 연결됨: {DB_PATH}")
+    print(f">>> DB connected: {DB_PATH}")

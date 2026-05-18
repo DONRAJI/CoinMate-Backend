@@ -158,75 +158,82 @@ class Backtester:
             pass
 
     def _simulate(self, df):
-        """
-        과거 90일 데이터 백테스팅
-        🔥 [수정됨] TradeManager의 과열 필터 로직을 그대로 적용하여 현실적인 결과 산출
-        """
+        """TradeManager와 동일한 조건으로 백테스트"""
         try:
-            capital = 1000000
+            capital = 1_000_000
             balance = capital
             shares = 0
-            avg_buy_price = 0
+            avg_buy = 0
+            high_since_buy = 0
             trade_count = 0
             win_count = 0
             max_balance = capital
             mdd = 0
-            
+
+            PROFIT_TARGET = 3.5
+            STOP_LOSS = -2.0
+            TRAILING_ACT = 2.0
+            TRAILING_DIST = 1.5
+
             days_to_test = min(90, len(df) - 20)
             start_idx = len(df) - days_to_test
-            
+
             for i in range(start_idx, len(df) - 1):
                 past = df.iloc[:i+1]
                 res = self.strategy.get_ensemble_signal(past, past)
-                
                 if not res: continue
-                
-                next_day_open = float(df.iloc[i+1]['open'])
-                
-                # --- 🔥 [핵심 수정] TradeManager와 동일한 필터링 로직 적용 ---
+
+                price = float(df.iloc[i]['close'])
+                next_open = float(df.iloc[i+1]['open'])
                 rsi = float(res['rsi'])
                 mfi = float(res.get('mfi', 50))
                 score = float(res['score'])
+                is_strong_trend = res['strategies'].get('adx', 0) == 1
 
-                is_overheated = False
-                if rsi >= 70: is_overheated = True        # RSI 과열
-                elif mfi >= 80: is_overheated = True      # MFI 과열 (고점 징후)
-                elif rsi >= 60 and mfi < 40: is_overheated = True # 설거지 패턴
+                # 매도 판단
+                if shares > 0:
+                    profit = ((price - avg_buy) / avg_buy) * 100
+                    high_since_buy = max(high_since_buy, price)
+                    dd_from_high = ((high_since_buy - price) / high_since_buy) * 100
 
-                # 매수 조건: 점수 7.0 이상 AND 과열 아님
-                should_buy_final = (score >= 7.0) and (not is_overheated)
-                # --------------------------------------------------------
+                    sell = False
+                    if profit <= STOP_LOSS:
+                        sell = True
+                    elif is_strong_trend and profit >= TRAILING_ACT and dd_from_high >= TRAILING_DIST:
+                        sell = True
+                    elif not is_strong_trend and profit >= PROFIT_TARGET:
+                        sell = True
+                    elif profit > 0.5 and (rsi >= 80 or mfi >= 85):
+                        sell = True
+                    elif score < 3.5:
+                        sell = True
 
-                # 매수 신호
-                if should_buy_final and shares == 0:
-                    shares = (balance * (1 - self.fee)) / next_day_open
+                    if sell:
+                        sell_val = shares * next_open * (1 - self.fee)
+                        pnl = ((next_open - avg_buy) / avg_buy) * 100
+                        if pnl > 0: win_count += 1
+                        balance = sell_val
+                        shares = 0
+                        trade_count += 1
+                        max_balance = max(max_balance, balance)
+                        dd = (max_balance - balance) / max_balance * 100
+                        mdd = max(mdd, dd)
+
+                # 매수 판단
+                overheated = rsi >= 70 or mfi >= 80 or (rsi >= 60 and mfi < 40)
+                if score >= self.strategy.BUY_THRESHOLD and not overheated and shares == 0:
+                    shares = (balance * (1 - self.fee)) / next_open
                     balance = 0
-                    avg_buy_price = next_day_open
-                
-                # 매도 신호 (TradeManager 기준: 3.5 미만이면 매도)
-                # (물론 실제는 익절/손절 로직이 더 있지만, 백테스트에선 점수 기반으로 단순화)
-                elif score < 3.5 and shares > 0:
-                    sell_val = shares * next_day_open * (1 - self.fee)
-                    
-                    if sell_val > (shares * avg_buy_price): 
-                        win_count += 1
-                    
-                    balance = sell_val
-                    shares = 0
-                    trade_count += 1
-                    
-                    max_balance = max(max_balance, balance)
-                    dd = (max_balance - balance) / max_balance * 100
-                    mdd = max(mdd, dd)
+                    avg_buy = next_open
+                    high_since_buy = next_open
 
-            final_asset = balance if balance > 0 else shares * df.iloc[-1]['close']
-            
+            final = balance if balance > 0 else shares * float(df.iloc[-1]['close'])
             return {
                 "win_rate": round((win_count / trade_count * 100) if trade_count > 0 else 0, 1),
-                "total_return": round(((final_asset / capital) - 1) * 100, 1),
+                "total_return": round(((final / capital) - 1) * 100, 1),
                 "mdd": round(mdd, 1)
             }
-        except Exception: 
+        except Exception:
             return {"win_rate": 0, "total_return": 0, "mdd": 0}
 
     def get_analysis(self, ticker):

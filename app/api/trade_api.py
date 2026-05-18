@@ -37,3 +37,13 @@ async def manual_buy(req: ManualTradeRequest):
 @router.post("/manual/sell")
 async def manual_sell(req: ManualTradeRequest):
     return await trade_manager.place_manual_sell(req.ticker)
+
+@router.get("/history")
+def get_trade_history(limit: int = 50):
+    trades = trade_manager.repo.get_closed_trades(limit)
+    return {"status": "success", "data": [dict(t) for t in trades]}
+
+@router.get("/stats")
+def get_trade_stats():
+    stats = trade_manager.repo.get_trade_stats()
+    return {"status": "success", "data": stats}

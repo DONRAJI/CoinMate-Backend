@@ -91,8 +91,42 @@ class TradeRepository:
             print(f"⚠️ [DB Error] 좀비 청산 실패: {e}")
 
     def get_open_trade(self, ticker):
-        """특정 코인의 진행 중인 거래 정보 가져오기"""
         with self.get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, buy_price, buy_amount FROM trades WHERE ticker=? AND status='open'", (ticker,))
             return cursor.fetchone()
+
+    def get_closed_trades(self, limit=50):
+        with self.get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trades WHERE status='closed' ORDER BY sell_time DESC LIMIT ?",
+                (limit,)
+            )
+            return cursor.fetchall()
+
+    def get_trade_stats(self):
+        with self.get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN profit_rate > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN profit_rate <= 0 THEN 1 ELSE 0 END) as losses,
+                    ROUND(AVG(profit_rate), 2) as avg_profit,
+                    ROUND(MAX(profit_rate), 2) as best_trade,
+                    ROUND(MIN(profit_rate), 2) as worst_trade
+                FROM trades WHERE status='closed'
+            """)
+            row = cursor.fetchone()
+            if not row or row['total'] == 0:
+                return {"total": 0, "wins": 0, "losses": 0, "avg_profit": 0, "win_rate": 0}
+            return {
+                "total": row['total'],
+                "wins": row['wins'] or 0,
+                "losses": row['losses'] or 0,
+                "avg_profit": row['avg_profit'] or 0,
+                "best_trade": row['best_trade'] or 0,
+                "worst_trade": row['worst_trade'] or 0,
+                "win_rate": round((row['wins'] or 0) / row['total'] * 100, 1),
+            }

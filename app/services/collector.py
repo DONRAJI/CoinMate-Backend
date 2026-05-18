@@ -3,11 +3,12 @@ import asyncio
 import json
 import time
 import pyupbit
-import websockets # pip install websockets 필요
+import websockets
 
 class Collector:
-    def __init__(self, shared_dict):
+    def __init__(self, shared_dict, lock: threading.Lock = None):
         self.shared_dict = shared_dict
+        self.lock = lock or threading.Lock()
         self.thread = None
         self.running = False
 
@@ -72,19 +73,20 @@ class Collector:
                         if 'code' in data:
                             ticker = data['code']
                             price = float(data['trade_price'])
-                            
-                            self.shared_dict[ticker] = {
+                            entry = {
                                 "current_price": price,
                                 "acc_trade_price_24h": float(data['acc_trade_price_24h']),
                                 "timestamp": time.time()
                             }
+                            with self.lock:
+                                self.shared_dict[ticker] = entry
                             
             except Exception as e:
                 print(f">>> ⚠️ [Collector] 연결 끊김 ({e}). 3초 후 재연결...")
                 await asyncio.sleep(3)
 
 # 전역 함수 (main.py에서 호출)
-def start_collector_thread(shared_dict):
-    collector = Collector(shared_dict)
+def start_collector_thread(shared_dict, lock=None):
+    collector = Collector(shared_dict, lock)
     collector.start()
     return collector

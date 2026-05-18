@@ -3,13 +3,16 @@ import time
 import gc
 from datetime import datetime
 
-# 분리한 파일들 임포트
 from app.core.trade_repository import TradeRepository
+from app.core.logger import get_logger
 from app.services.order_executor import OrderExecutor
 from app.services.strategy import Strategy
 from app.services.backtester import Backtester
+from app.services import notifier
 from app.core.database import init_db
 import pyupbit
+
+log = get_logger("trade")
 
 class TradeManager:
     def __init__(self):
@@ -22,6 +25,7 @@ class TradeManager:
         
         self.is_active = False
         self.shared_data = {}
+        self._data_lock = None
         self.market_status = {}
         self.target_coins = []
         
@@ -33,17 +37,19 @@ class TradeManager:
         self.cached_min_dfs = {}
         self.last_api_call_time = {}
         self.sell_timestamps = {}
-        self.trailing_status = {}
+
         self.REBUY_COOLDOWN = 3600 
         
         # 설정값
-        self.MAX_COIN_COUNT = 4 
+        self.MAX_COIN_COUNT = 4
         self.MIN_ORDER_KRW = 6000
-        self.CACHE_TTL_SECONDS = 300   # 🔥 [시스템최적화] 캐시 만료 시간 추가
-        self.MIN_OHLCV_INTERVAL = 60   # 🔥 [시스템최적화] API 호출 제한 시간 추가
-        self.TRAILING_START = 2.0
-        self.TRAILING_CALLBACK = 1.0
-        self.STOP_LOSS = -3.0
+        self.CACHE_TTL_SECONDS = 300
+        self.MIN_OHLCV_INTERVAL = 60
+        self.PROFIT_TARGET = 3.5
+        self.STOP_LOSS = -2.0
+        self.TRAILING_ACTIVATION = 2.0
+        self.TRAILING_DISTANCE = 1.5
+        self.high_watermarks = {}
         
         self.STRATEGY_MAP = {
             "trend": "추세", "volume": "거래량폭발", "stoch": "골든크로스",
@@ -51,9 +57,16 @@ class TradeManager:
             "macd": "MACD", "adx": "강한추세", "vwap": "세력평단", "cci": "과매도탈출"
         }
 
-    def set_shared_data(self, shared_data):
+    def set_shared_data(self, shared_data, lock=None):
         self.shared_data = shared_data
+        self._data_lock = lock
         print(f">>> 🔗 [TradeManager] 데이터 통 연결 완료! (ID: {id(self.shared_data)})")
+
+    def _snapshot_shared_data(self):
+        if self._data_lock:
+            with self._data_lock:
+                return dict(self.shared_data)
+        return dict(self.shared_data)
 
     def start(self):
         self.is_active = True
@@ -68,22 +81,22 @@ class TradeManager:
         print(">>> ⏳ [System] 실시간 시세 데이터 수신 대기 중...")
         
         # --- [데이터 수신 대기 구간] ---
+        MAX_WAIT = 600
         wait_seconds = 0
-        while True:
-            # 현재 데이터 개수 확인
+        while wait_seconds < MAX_WAIT:
             data_len = len(self.shared_data) if self.shared_data else 0
-            
-            # 1. 데이터가 충분히 모이면 탈출 (10개 이상)
-            if data_len > 10: 
+
+            if data_len > 10:
                 print(f"\n>>> 📶 [System] 실시간 데이터 수신 확인됨! (현재 {data_len}개)")
                 break
-            
-            # 2. 1초마다 로그 찍기 (도대체 몇 개인지 눈으로 확인)
-            if wait_seconds % 2 == 0:
+
+            if wait_seconds % 10 == 0:
                 print(f">>> ⏳ 데이터 대기 중... (현재: {data_len}개 / 목표: 10개) - {wait_seconds}초 경과")
-            
+
             wait_seconds += 1
             await asyncio.sleep(1)
+        else:
+            print(">>> ❌ [System] 데이터 수신 타임아웃 (10분). 가용 데이터로 시작합니다.")
         
         # --- [본격적인 매매 루프] ---
         print(">>> 🚀 [System] 매매 로직 가동 시작!")
@@ -114,7 +127,8 @@ class TradeManager:
                 await asyncio.sleep(1)
                 
             except Exception as e:
-                print(f"[Loop Error] {e}")
+                log.error(f"[Loop Error] {e}", exc_info=True)
+                asyncio.create_task(notifier.notify_error("MainLoop", str(e)))
                 await asyncio.sleep(5)
 
     async def process_selling(self):
@@ -134,56 +148,55 @@ class TradeManager:
             df_day, df_min, current, is_real = await self.get_smart_candles(ticker)
             if not is_real or current == 0: continue
 
-            if buy_price <= 0: buy_price = current 
+            if buy_price <= 0: buy_price = current
             profit_rate = ((current - buy_price) / buy_price) * 100
-            
+
+            # 고점 갱신 (트레일링 스탑용)
+            prev_high = self.high_watermarks.get(ticker, current)
+            self.high_watermarks[ticker] = max(prev_high, current)
+            high = self.high_watermarks[ticker]
+            drawdown_from_high = ((high - current) / high) * 100 if high > 0 else 0
+
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             self._update_market_status(ticker, current, res)
 
-            # --- [매도 로직 시작] ---
-            
-            # 0. 최고가(Peak) 업데이트
-            peak_price = self.trailing_status.get(ticker, buy_price)
-            if current > peak_price:
-                peak_price = current
-                self.trailing_status[ticker] = peak_price
+            is_strong_trend = res['strategies'].get('adx', 0) == 1
 
             reason = ""
-
-            # 1. 손절 기준 (Stop Loss)
+            # 1. 손절 (최우선)
             if profit_rate <= self.STOP_LOSS:
-                reason = f"💧손절방어({profit_rate:.2f}%)"
+                reason = f"손절방어({profit_rate:.2f}%)"
 
-            # 2. 트레일링 스탑 (Trailing Stop)
-            elif profit_rate >= self.TRAILING_START:
-                drawdown_pct = ((peak_price - current) / peak_price) * 100 if peak_price > 0 else 0
-                if drawdown_pct >= self.TRAILING_CALLBACK:
-                    reason = (
-                        f"📉트레일링스탑({profit_rate:.2f}%, "
-                        f"피크-{drawdown_pct:.2f}%)"
-                    )
-            
-            # 3. 수익권일 때 과열 지표 체크
-            elif profit_rate > 0.5: 
-                if res['rsi'] >= 80: reason = f"🔥RSI과열({profit_rate:.2f}%)"
-                elif res.get('mfi', 0) >= 85: reason = f"🌊MFI과열({profit_rate:.2f}%)"
-            
-            # 4. 전략 점수 급락
+            # 2. 트레일링 스탑 (강한 추세일 때만)
+            elif is_strong_trend and profit_rate >= self.TRAILING_ACTIVATION and drawdown_from_high >= self.TRAILING_DISTANCE:
+                reason = f"트레일링({profit_rate:.2f}%,고점대비-{drawdown_from_high:.1f}%)"
+
+            # 3. 고정 익절 (추세 약할 때)
+            elif not is_strong_trend and profit_rate >= self.PROFIT_TARGET:
+                reason = f"익절달성({profit_rate:.2f}%)"
+
+            # 4. 수익권 과열 체크
+            elif profit_rate > 0.5:
+                if res['rsi'] >= 80: reason = f"RSI과열({profit_rate:.2f}%)"
+                elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
+
+            # 5. 전략 점수 급락
             elif res['score'] < 3.5:
-                reason = f"📉점수하락({res['score']}점)"
-            
-            # 5. 이상 징후 (설거지 감지)
+                reason = f"점수하락({res['score']}점)"
+
+            # 6. 이상 징후
             elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
-                reason = f"⚠️이상징후(설거지감지)"
+                reason = f"이상징후(설거지감지)"
 
             # --- [매도 실행] ---
             if reason and self.is_active:
-                print(f"👋 [매도 판단] {ticker} -> {reason}")
+                log.info(f"[매도 판단] {ticker} -> {reason}")
                 success = await self.executor.try_sell(trade_id, ticker, current, reason)
                 if success:
                     self.sell_timestamps[ticker] = time.time()
-                    self.trailing_status.pop(ticker, None)
-                    
+                    self.high_watermarks.pop(ticker, None)
+                    asyncio.create_task(notifier.notify_sell(ticker, current, profit_rate, reason))
+
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
@@ -229,9 +242,8 @@ class TradeManager:
             if rsi >= 70: continue         
             if mfi >= 80: continue        
             if rsi >= 60 and mfi < 40: continue
-            if score < 7.0: continue # 기준점
-            
-            # 🚫 Filter: Shooting Star Detected (Upper Wick > Body * 2)
+            if score < self.strategy.BUY_THRESHOLD: continue
+
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
             last_high = df_min['high'].iloc[-1]
@@ -241,13 +253,11 @@ class TradeManager:
             if body_size > 0 and upper_wick > (body_size * 2):
                 continue
 
-            # 🚫 Filter: Low Volume Pump (Price up > 3% but Volume below MA20)
             volume_ma20 = df_min['volume'].rolling(20).mean().iloc[-1]
             price_change_pct = ((last_close - last_open) / last_open) * 100 if last_open > 0 else 0
             if price_change_pct > 3 and df_min['volume'].iloc[-1] < volume_ma20:
                 continue
 
-            # 🚫 Filter: Extreme Volatility (Range > 10% of Open)
             price_range_pct = ((last_high - last_low) / last_open) * 100 if last_open > 0 else 0
             if price_range_pct > 10:
                 continue
@@ -268,10 +278,11 @@ class TradeManager:
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
                 
-                print(f"🏆 [Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f}) -> 매수")
-                
+                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f}) -> 매수")
+
                 success = await self.executor.try_buy(ticker, price, budget, strategy_name)
                 if success:
+                    asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
                     if ticker in self.market_status:
                         self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
                     await asyncio.sleep(0.2)
@@ -327,7 +338,7 @@ class TradeManager:
             
             # --- [1] 종목 선정 로직 ---
             MIN_TRADE_PRICE = 5_000_000_000 
-            all_data = list(self.shared_data.items())
+            all_data = list(self._snapshot_shared_data().items())
             sorted_by_vol = sorted(all_data, key=lambda x: x[1]['acc_trade_price_24h'], reverse=True)
             valid_tickers = [item[0] for item in sorted_by_vol if item[1]['acc_trade_price_24h'] >= MIN_TRADE_PRICE]
             top_50_tickers = set(valid_tickers[:50])
@@ -489,8 +500,8 @@ class TradeManager:
             if ticker not in active_tickers: del self.cached_min_dfs[ticker]
         for ticker in list(self.last_api_call_time.keys()):
             if ticker not in active_tickers: del self.last_api_call_time[ticker]
-        for ticker in list(self.trailing_status.keys()):
-            if ticker not in active_tickers: del self.trailing_status[ticker]
+        for ticker in list(self.high_watermarks.keys()):
+            if ticker not in active_tickers: del self.high_watermarks[ticker]
         
         # 🔥 [시스템최적화] TTL 만료된 캐시 강제 삭제
         now = time.time()
