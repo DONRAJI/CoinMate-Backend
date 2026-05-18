@@ -225,14 +225,15 @@ class TradeManager:
             if not is_real: continue
             
             res = self.strategy.get_ensemble_signal(df_day, df_min)
-            
+            if not res: continue
+
             # UI용 상태 업데이트
             self._update_market_status(ticker, current, res)
-            
+
             if not can_buy or is_holding or is_cooldown: continue
 
             # --- 매수 후보 필터링 로직 ---
-            res['ticker'] = ticker 
+            res['ticker'] = ticker
             res['current_price'] = current
 
             rsi = res['rsi']
