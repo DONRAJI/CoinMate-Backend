@@ -556,6 +556,8 @@ class TradeManager:
         
         try:
             all_balances = self.executor.get_all_balances()
+            if not isinstance(all_balances, list):
+                raise ValueError(f"API 응답 오류: {all_balances}")
             balance_dict = {}
             for b in all_balances:
                 if b['currency'] == 'KRW':
