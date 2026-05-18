@@ -110,6 +110,7 @@ class TradeManager:
                 # ... (기존 매매 로직 유지) ...
                 if loop_count % 300 == 0:
                     await self.update_target_coins()
+                    await self.refresh_target_scores()
                     self.cleanup_old_cache()
                 
                 now = datetime.now()
@@ -477,7 +478,9 @@ class TradeManager:
                         "atr": cached.get('atr', 0),
                         "stop_loss_price": cached.get('stop_loss_price', 0),
                         "strategies": cached.get('strategies', {}),
-                        "score_breakdown": cached.get('score_breakdown', [])
+                        "score_breakdown": cached.get('score_breakdown', []),
+                        "regime": cached.get('regime', 'normal'),
+                        "adx": cached.get('adx', 0),
                     })
                 
                 base_data["price"] = realtime_price
@@ -529,6 +532,43 @@ class TradeManager:
             
         return df_day, df_min, current_price, is_realtime
 
+    async def refresh_target_scores(self):
+        """타겟 종목만 실시간 OHLCV로 점수 재계산 (5분 주기)"""
+        refreshed = 0
+        for ticker in list(self.target_coins):
+            try:
+                df_day, df_min, current_price, _ = await self.get_smart_candles(ticker)
+                if df_day is None or len(df_day) < 30:
+                    continue
+                res = self.strategy.get_ensemble_signal(df_day, df_min)
+                if not res:
+                    continue
+                self.backtester.results_cache[ticker] = {
+                    "ticker": ticker,
+                    "win_rate": self.backtester.results_cache.get(ticker, {}).get('win_rate', 0),
+                    "total_yield": self.backtester.results_cache.get(ticker, {}).get('total_yield', 0),
+                    "mdd": self.backtester.results_cache.get(ticker, {}).get('mdd', 0),
+                    "score": float(res['score']),
+                    "should_buy": bool(res['should_buy']),
+                    "current_price": float(current_price),
+                    "target_price": float(res.get('target_price', 0)),
+                    "stop_loss_price": float(res.get('stop_loss_price', 0)),
+                    "atr": float(res.get('atr', 0)),
+                    "rsi": float(res['rsi']),
+                    "mfi": float(res['mfi']),
+                    "strategies": {k: int(v) for k, v in res['strategies'].items()},
+                    "score_breakdown": res.get("score_breakdown", []),
+                    "regime": res.get('regime', 'normal'),
+                    "adx": res.get('adx', 0),
+                }
+                self._update_market_status(ticker, current_price, res)
+                refreshed += 1
+                await asyncio.sleep(0.1)
+            except Exception:
+                pass
+        if refreshed > 0:
+            print(f">>> 🔄 [Refresh] 타겟 {refreshed}개 종목 점수 갱신 완료")
+
     def cleanup_old_cache(self):
         active_tickers = set(self.target_coins)
         for ticker in list(self.cached_day_dfs.keys()):
@@ -576,7 +616,9 @@ class TradeManager:
                 "atr": result.get('atr', 0),
                 "stop_loss_price": result.get('stop_loss_price', 0),
                 "strategies": result['strategies'],
-                "score_breakdown": result.get('score_breakdown', [])
+                "score_breakdown": result.get('score_breakdown', []),
+                "regime": result.get('regime', 'normal'),
+                "adx": result.get('adx', 0),
             })
             
     def _is_holding(self, ticker):

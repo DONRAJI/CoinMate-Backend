@@ -152,7 +152,9 @@ class Backtester:
                 "rsi": float(strategy_res['rsi']),
                 "mfi": float(strategy_res['mfi']),
                 "strategies": strategies,
-                "score_breakdown": strategy_res.get("score_breakdown", [])
+                "score_breakdown": strategy_res.get("score_breakdown", []),
+                "regime": strategy_res.get("regime", "normal"),
+                "adx": strategy_res.get("adx", 0),
             }
         except Exception:
             pass
