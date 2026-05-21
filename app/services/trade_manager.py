@@ -238,9 +238,8 @@ class TradeManager:
         krw = self.executor.get_krw_balance()
         can_buy = (empty_slots > 0) and (krw >= self.MIN_ORDER_KRW)
         
-        budget = 0
-        if can_buy:
-            budget = min((krw * 0.99) / empty_slots, self.MIN_ORDER_KRW)
+        available_krw = krw * 0.99 if can_buy else 0
+        MAX_SINGLE_RATIO = 0.4
 
         # --- [2] 종목 스캔 & 점수 업데이트 ---
         candidates = []
@@ -313,24 +312,37 @@ class TradeManager:
             print(f"  ✅ [Pass] {ticker}: 점수{score} RSI:{rsi:.0f} MFI:{mfi:.0f} → 매수후보")
             candidates.append(res)
         
-        # --- [3] 실제 매수 실행 ---
+        # --- [3] 점수 가중 예산 배분 + 매수 실행 ---
         if candidates and can_buy:
             candidates.sort(key=lambda x: (x['score'], x['mfi']), reverse=True)
             final_picks = candidates[:empty_slots]
-            
+
+            total_score = sum(p['score'] for p in final_picks)
+            max_per_coin = available_krw * MAX_SINGLE_RATIO
+
             for pick in final_picks:
                 ticker = pick.get('ticker')
                 price = pick.get('current_price')
-                
                 if not ticker: continue
-                
+
+                if len(final_picks) == 1:
+                    budget = min(available_krw, max_per_coin)
+                else:
+                    weight = pick['score'] / total_score if total_score > 0 else 1.0 / len(final_picks)
+                    budget = min(available_krw * weight, max_per_coin)
+
+                if budget < self.MIN_ORDER_KRW:
+                    print(f"  💸 [Skip] {ticker}: 예산부족({budget:.0f}원 < {self.MIN_ORDER_KRW}원)")
+                    continue
+
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
-                
-                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f}) -> 매수")
+
+                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / 예산:{budget:.0f}원) -> 매수")
 
                 success = await self.executor.try_buy(ticker, price, budget, strategy_name)
                 if success:
+                    available_krw -= budget
                     asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
                     if ticker in self.market_status:
                         self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
