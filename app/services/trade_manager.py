@@ -386,13 +386,20 @@ class TradeManager:
             
             ai_candidates = self.backtester.get_best_opportunities(top_n=20)
             added_ai = 0
+            # 거래량 50위 제약 제거: AI 점수가 높으면 거래량 무관하게 추가
+            # 단, 최소 거래대금 필터(50억)는 유지하여 유동성 확보
+            all_ticker_vol = {item[0]: item[1]['acc_trade_price_24h'] for item in all_data}
+            MIN_AI_TRADE_PRICE = 1_000_000_000  # AI 추천은 10억 이상이면 허용
             for t in ai_candidates:
                 if t in targets_map: continue
-                if t in top_50_tickers:
+                vol = all_ticker_vol.get(t, 0)
+                if vol >= MIN_AI_TRADE_PRICE:
                     targets_map[t] = "AI 추천(우량주)"
                     added_ai += 1
                 if added_ai >= 5: break
-            
+
+            print(f">>> 📊 [Target] 거래량:{len(top_5_vol)}개, AI:{added_ai}개, 캐시:{len(self.backtester.results_cache)}개")
+
             if len(targets_map) < 10:
                 for t in top_50_tickers:
                     if t not in targets_map:
