@@ -240,8 +240,7 @@ class TradeManager:
         
         budget = 0
         if can_buy:
-            budget = (krw * 0.99) / empty_slots
-            if budget < self.MIN_ORDER_KRW: budget = krw * 0.99
+            budget = min((krw * 0.99) / empty_slots, self.MIN_ORDER_KRW)
 
         # --- [2] 종목 스캔 & 점수 업데이트 ---
         candidates = []
