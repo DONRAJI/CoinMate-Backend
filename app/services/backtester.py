@@ -193,8 +193,8 @@ class Backtester:
                 regime = res.get('regime', 'normal')
                 is_sideways = regime == 'sideways'
 
-                stop_loss = -1.5 if is_sideways else -2.0
-                profit_target = 2.0 if is_sideways else 3.5
+                stop_loss = -2.5 if is_sideways else -3.0
+                profit_target = 2.0 if is_sideways else 3.0
 
                 # 매도 판단
                 if shares > 0:
@@ -214,7 +214,7 @@ class Backtester:
                         sell = True
                     elif profit > 0.5 and (rsi >= 80 or mfi >= 85):
                         sell = True
-                    elif score < 3.5:
+                    elif score < 2.5:
                         sell = True
 
                     if sell:
@@ -230,7 +230,7 @@ class Backtester:
                         mdd = max(mdd, dd)
 
                 # 매수 판단
-                overheated = rsi >= 70 or mfi >= 80 or (rsi >= 60 and mfi < 40)
+                overheated = rsi >= 75 or mfi >= 85 or (rsi >= 65 and mfi < 35)
                 if score >= self.strategy.BUY_THRESHOLD and not overheated and shares == 0:
                     shares = (balance * (1 - self.fee)) / next_open
                     balance = 0

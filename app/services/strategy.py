@@ -14,7 +14,7 @@ class Strategy:
             "oscillator_group": 3.0, # RSI/MFI 통합
             "bollinger": 1.5,        # 밴드 반등
         }
-        self.BUY_THRESHOLD = 7.5
+        self.BUY_THRESHOLD = 6.0
 
     def get_ensemble_signal(self, df_day: pd.DataFrame, df_min: pd.DataFrame = None, debug=False):
         """

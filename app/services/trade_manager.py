@@ -38,15 +38,15 @@ class TradeManager:
         self.last_api_call_time = {}
         self.sell_timestamps = {}
 
-        self.REBUY_COOLDOWN = 3600 
-        
+        self.REBUY_COOLDOWN = 1800
+
         # 설정값
-        self.MAX_COIN_COUNT = 4
+        self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
         self.CACHE_TTL_SECONDS = 300
         self.MIN_OHLCV_INTERVAL = 60
-        self.PROFIT_TARGET = 3.5
-        self.STOP_LOSS = -2.0
+        self.PROFIT_TARGET = 3.0
+        self.STOP_LOSS = -3.0
         self.TRAILING_ACTIVATION = 2.0
         self.TRAILING_DISTANCE = 1.5
         self.high_watermarks = {}
@@ -168,7 +168,7 @@ class TradeManager:
 
             # 레짐별 매도 파라미터
             if is_sideways:
-                stop_loss = -1.5
+                stop_loss = -2.5
                 profit_target = 2.0
             else:
                 stop_loss = self.STOP_LOSS
@@ -211,11 +211,11 @@ class TradeManager:
                 elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
 
             # 6. 전략 점수 급락
-            elif res['score'] < 3.5:
+            elif res['score'] < 2.5:
                 reason = f"점수하락({res['score']}점)"
 
-            # 7. 이상 징후
-            elif res['rsi'] < 50 and res.get('mfi', 0) >= 75:
+            # 7. 이상 징후 (강한 괴리만)
+            elif res['rsi'] < 40 and res.get('mfi', 0) >= 85:
                 reason = f"이상징후(설거지감지)"
 
             # --- [매도 실행] ---
@@ -270,9 +270,9 @@ class TradeManager:
             mfi = res.get('mfi', 50)
             score = res['score']
 
-            if rsi >= 70: continue         
-            if mfi >= 80: continue        
-            if rsi >= 60 and mfi < 40: continue
+            if rsi >= 75: continue
+            if mfi >= 85: continue
+            if rsi >= 65 and mfi < 35: continue
             if score < self.strategy.BUY_THRESHOLD: continue
 
             last_open = df_min['open'].iloc[-1]
