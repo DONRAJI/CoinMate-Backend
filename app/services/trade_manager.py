@@ -260,7 +260,13 @@ class TradeManager:
             # UI용 상태 업데이트
             self._update_market_status(ticker, current, res)
 
-            if not can_buy or is_holding or is_cooldown: continue
+            if not can_buy:
+                continue
+            if is_holding:
+                continue
+            if is_cooldown:
+                print(f"  ⏳ [Skip] {ticker}: 쿨타임")
+                continue
 
             # --- 매수 후보 필터링 로직 ---
             res['ticker'] = ticker
@@ -270,10 +276,19 @@ class TradeManager:
             mfi = res.get('mfi', 50)
             score = res['score']
 
-            if rsi >= 75: continue
-            if mfi >= 85: continue
-            if rsi >= 65 and mfi < 35: continue
-            if score < self.strategy.BUY_THRESHOLD: continue
+            if score < self.strategy.BUY_THRESHOLD:
+                continue
+
+            # 점수 통과 → 이후 필터 로그 출력
+            if rsi >= 75:
+                print(f"  🚫 [Skip] {ticker}: RSI과열({rsi:.1f})")
+                continue
+            if mfi >= 85:
+                print(f"  🚫 [Skip] {ticker}: MFI과열({mfi:.1f})")
+                continue
+            if rsi >= 65 and mfi < 35:
+                print(f"  🚫 [Skip] {ticker}: RSI/MFI괴리(RSI:{rsi:.1f},MFI:{mfi:.1f})")
+                continue
 
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
@@ -282,17 +297,21 @@ class TradeManager:
             body_size = abs(last_close - last_open)
             upper_wick = last_high - max(last_open, last_close)
             if body_size > 0 and upper_wick > (body_size * 2):
+                print(f"  🚫 [Skip] {ticker}: 슈팅스타(윗꼬리)")
                 continue
 
             volume_ma20 = df_min['volume'].rolling(20).mean().iloc[-1]
             price_change_pct = ((last_close - last_open) / last_open) * 100 if last_open > 0 else 0
             if price_change_pct > 3 and df_min['volume'].iloc[-1] < volume_ma20:
+                print(f"  🚫 [Skip] {ticker}: 저거래량펌프({price_change_pct:.1f}%)")
                 continue
 
             price_range_pct = ((last_high - last_low) / last_open) * 100 if last_open > 0 else 0
             if price_range_pct > 10:
+                print(f"  🚫 [Skip] {ticker}: 극단변동성({price_range_pct:.1f}%)")
                 continue
 
+            print(f"  ✅ [Pass] {ticker}: 점수{score} RSI:{rsi:.0f} MFI:{mfi:.0f} → 매수후보")
             candidates.append(res)
         
         # --- [3] 실제 매수 실행 ---
@@ -398,7 +417,11 @@ class TradeManager:
                     added_ai += 1
                 if added_ai >= 5: break
 
+            ai_list = [t for t, c in targets_map.items() if 'AI' in c]
             print(f">>> 📊 [Target] 거래량:{len(top_5_vol)}개, AI:{added_ai}개, 캐시:{len(self.backtester.results_cache)}개")
+            print(f">>> 📊 [Target] 전체목록: {list(targets_map.keys())}")
+            if ai_list:
+                print(f">>> 📊 [Target] AI종목: {ai_list}")
 
             if len(targets_map) < 10:
                 for t in top_50_tickers:
