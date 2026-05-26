@@ -269,6 +269,13 @@ class TradeManager:
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             if not res: continue
 
+            # ML 예측 (UI 표시용 — 모든 종목)
+            if self.ml.is_trained:
+                ml_prob = self.ml.predict(df_day)
+                res['ml_prob'] = ml_prob
+            else:
+                res['ml_prob'] = None
+
             # UI용 상태 업데이트
             self._update_market_status(ticker, current, res)
 
@@ -302,16 +309,13 @@ class TradeManager:
                 print(f"  🚫 [Skip] {ticker}: RSI/MFI괴리(RSI:{rsi:.1f},MFI:{mfi:.1f})")
                 continue
 
-            # ML 예측 필터
-            if self.ml.is_trained:
-                ml_prob = self.ml.predict(df_day)
-                res['ml_prob'] = ml_prob
+            # ML 예측 필터 (위에서 이미 계산됨)
+            ml_prob = res.get('ml_prob')
+            if self.ml.is_trained and ml_prob is not None:
                 if ml_prob < self.ML_MIN_PROB:
                     print(f"  🤖 [Skip] {ticker}: ML확률부족({ml_prob:.1%})")
                     continue
                 print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%}")
-            else:
-                res['ml_prob'] = 0.5
 
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
@@ -686,6 +690,7 @@ class TradeManager:
                 "score_breakdown": result.get('score_breakdown', []),
                 "regime": result.get('regime', 'normal'),
                 "adx": result.get('adx', 0),
+                "ml_prob": result.get('ml_prob', None),
             })
             
     def _is_holding(self, ticker):

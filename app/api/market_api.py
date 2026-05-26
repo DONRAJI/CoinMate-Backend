@@ -49,6 +49,14 @@ async def analyze_coin(ticker: str):
         elif trade_manager.shared_data and ticker in trade_manager.shared_data:
             response_data['current_price'] = trade_manager.shared_data[ticker]['current_price']
 
+        # ML 예측 추가
+        if ticker in trade_manager.cached_day_dfs:
+            ml_prob = trade_manager.ml.predict(trade_manager.cached_day_dfs[ticker])
+            response_data['ml_prob'] = ml_prob
+
+        # ML 모델 상태
+        response_data['ml_status'] = trade_manager.ml.get_status()
+
         return {
             "status": "success",
             "data": response_data
@@ -61,3 +69,8 @@ async def analyze_coin(ticker: str):
 @router.get("/status/{ticker}")
 def get_coin_status(ticker: str):
     return {"status": "success", "data": {}}
+
+@router.get("/ml/status")
+def get_ml_status():
+    """ML 모델 상태 조회"""
+    return {"status": "success", "data": trade_manager.ml.get_status()}
