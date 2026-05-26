@@ -14,7 +14,17 @@ cache/
 *.db
 *.sqlite3
 
-# 5. 로그 파일
+# 5. 임시/분석 스크립트 (API 키 포함 가능)
+fix_trades.py
+analyze_trades.py
+analyze_*.py
+check_db.py
+fix_*.py
+
+# 6. ML 모델 파일
+models/
+
+# 7. 로그 파일
 logs/
 
 # 6. OS 생성 파일 (맥/윈도우 썸네일 등)

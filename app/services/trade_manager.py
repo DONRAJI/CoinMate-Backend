@@ -199,9 +199,11 @@ class TradeManager:
                     pass
 
             reason = ""
+            reason_detail = ""
             # 1. 손절 (최우선 — 야간에도 실행)
             if profit_rate <= stop_loss:
-                reason = f"손절방어({profit_rate:.2f}%,{regime})"
+                reason = "stop_loss"
+                reason_detail = f"{profit_rate:.2f}%,{regime}"
 
             # 야간 모드: 손절 외 매도 차단
             elif night_mode:
@@ -209,32 +211,42 @@ class TradeManager:
 
             # 2. 트레일링 스탑 (강한 추세일 때만)
             elif is_strong_trend and profit_rate >= self.TRAILING_ACTIVATION and drawdown_from_high >= self.TRAILING_DISTANCE:
-                reason = f"트레일링({profit_rate:.2f}%,고점대비-{drawdown_from_high:.1f}%)"
+                reason = "trailing"
+                reason_detail = f"{profit_rate:.2f}%,고점대비-{drawdown_from_high:.1f}%"
 
             # 3. 익절 (레짐별 목표가 다름)
             elif not is_strong_trend and profit_rate >= profit_target:
-                reason = f"익절달성({profit_rate:.2f}%,{regime})"
+                reason = "take_profit"
+                reason_detail = f"{profit_rate:.2f}%,{regime}"
 
             # 4. 횡보장 시간 기반 탈출: 48시간 보유 + 수익 < 1%
             elif is_sideways and holding_hours >= 48 and profit_rate < 1.0:
-                reason = f"횡보탈출({holding_hours:.0f}h,{profit_rate:.2f}%)"
+                reason = "sideways_exit"
+                reason_detail = f"{holding_hours:.0f}h,{profit_rate:.2f}%"
 
             # 5. 수익권 과열 체크 (최소 2% 이상 수익일 때만)
             elif profit_rate > 2.0:
-                if res['rsi'] >= 80: reason = f"RSI과열({profit_rate:.2f}%)"
-                elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
+                if res['rsi'] >= 80:
+                    reason = "rsi_overheat"
+                    reason_detail = f"{profit_rate:.2f}%"
+                elif res.get('mfi', 0) >= 85:
+                    reason = "mfi_overheat"
+                    reason_detail = f"{profit_rate:.2f}%"
 
             # 6. 전략 점수 급락 (손실 중일 때만 — 수익 중이면 홀딩)
             elif res['score'] < 3.0 and profit_rate < -0.5:
-                reason = f"점수하락({res['score']}점,{profit_rate:.2f}%)"
+                reason = "score_drop"
+                reason_detail = f"{res['score']}점,{profit_rate:.2f}%"
 
             # 7. 이상 징후 (강한 괴리만)
             elif res['rsi'] < 40 and res.get('mfi', 0) >= 85:
-                reason = f"이상징후(설거지감지)"
+                reason = "anomaly"
+                reason_detail = "설거지감지"
 
             # --- [매도 실행] ---
             if reason and self.is_active:
-                log.info(f"[매도 판단] {ticker} -> {reason}")
+                sell_reason_full = f"{reason}({reason_detail})" if reason_detail else reason
+                log.info(f"[매도 판단] {ticker} -> {sell_reason_full}")
                 success = await self.executor.try_sell(trade_id, ticker, current, reason)
                 if success:
                     self.sell_timestamps[ticker] = time.time()

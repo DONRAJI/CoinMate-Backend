@@ -47,3 +47,62 @@ def get_trade_history(limit: int = 50):
 def get_trade_stats():
     stats = trade_manager.repo.get_trade_stats()
     return {"status": "success", "data": stats}
+
+# === 설정 조회/변경 API ===
+@router.get("/config")
+def get_config():
+    """현재 봇 설정값 조회"""
+    return {
+        "status": "success",
+        "data": {
+            "stop_loss": trade_manager.STOP_LOSS,
+            "profit_target": trade_manager.PROFIT_TARGET,
+            "trailing_activation": trade_manager.TRAILING_ACTIVATION,
+            "trailing_distance": trade_manager.TRAILING_DISTANCE,
+            "max_coin_count": trade_manager.MAX_COIN_COUNT,
+            "min_order_krw": trade_manager.MIN_ORDER_KRW,
+            "rebuy_cooldown": trade_manager.REBUY_COOLDOWN,
+            "buy_threshold": trade_manager.strategy.BUY_THRESHOLD,
+        }
+    }
+
+class ConfigUpdateRequest(BaseModel):
+    stop_loss: float | None = None
+    profit_target: float | None = None
+    trailing_activation: float | None = None
+    trailing_distance: float | None = None
+    max_coin_count: int | None = None
+    min_order_krw: int | None = None
+    rebuy_cooldown: int | None = None
+    buy_threshold: float | None = None
+
+@router.post("/config")
+def update_config(req: ConfigUpdateRequest):
+    """봇 설정값 실시간 변경 (재시작 불필요, 서버 재시작 시 초기화됨)"""
+    changes = []
+    if req.stop_loss is not None:
+        trade_manager.STOP_LOSS = req.stop_loss
+        changes.append(f"stop_loss={req.stop_loss}")
+    if req.profit_target is not None:
+        trade_manager.PROFIT_TARGET = req.profit_target
+        changes.append(f"profit_target={req.profit_target}")
+    if req.trailing_activation is not None:
+        trade_manager.TRAILING_ACTIVATION = req.trailing_activation
+        changes.append(f"trailing_activation={req.trailing_activation}")
+    if req.trailing_distance is not None:
+        trade_manager.TRAILING_DISTANCE = req.trailing_distance
+        changes.append(f"trailing_distance={req.trailing_distance}")
+    if req.max_coin_count is not None:
+        trade_manager.MAX_COIN_COUNT = req.max_coin_count
+        changes.append(f"max_coin_count={req.max_coin_count}")
+    if req.min_order_krw is not None:
+        trade_manager.MIN_ORDER_KRW = req.min_order_krw
+        changes.append(f"min_order_krw={req.min_order_krw}")
+    if req.rebuy_cooldown is not None:
+        trade_manager.REBUY_COOLDOWN = req.rebuy_cooldown
+        changes.append(f"rebuy_cooldown={req.rebuy_cooldown}")
+    if req.buy_threshold is not None:
+        trade_manager.strategy.BUY_THRESHOLD = req.buy_threshold
+        changes.append(f"buy_threshold={req.buy_threshold}")
+
+    return {"status": "success", "message": f"변경됨: {', '.join(changes)}"}
