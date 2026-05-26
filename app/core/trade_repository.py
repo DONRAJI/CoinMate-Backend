@@ -122,10 +122,9 @@ class TradeRepository:
                     ROUND(MAX(profit_rate), 2) as best_trade,
                     ROUND(MIN(profit_rate), 2) as worst_trade,
                     ROUND(SUM(
-                        COALESCE(buy_amount * (profit_rate / 100.0), 0)
-                        - buy_amount * 0.001
+                        buy_amount * (1 - 0.0005) * (1 + profit_rate / 100.0) * (1 - 0.0005) - buy_amount
                     ), 0) as total_pnl
-                FROM trades WHERE status='closed'
+                FROM trades WHERE status='closed' AND profit_rate IS NOT NULL
             """)
             row = cursor.fetchone()
             if not row or row['total'] == 0:
