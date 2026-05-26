@@ -41,8 +41,8 @@ class Collector:
         # 1. 티커 조회
         try:
             tickers = pyupbit.get_tickers(fiat="KRW")
-        except:
-            # 실패 시 비상용 하드코딩 (최소한의 코인으로라도 돌리기 위해)
+        except Exception as e:
+            print(f"⚠️ [Collector] 티커 조회 실패, 비상 목록 사용: {e}")
             tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP"]
         
         uri = "wss://api.upbit.com/websocket/v1"
