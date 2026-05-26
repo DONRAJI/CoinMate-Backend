@@ -164,6 +164,29 @@ class MLPredictor:
         feat['volatility_5d'] = close.pct_change().rolling(5).std() * 100
         feat['volatility_10d'] = close.pct_change().rolling(10).std() * 100
 
+        # --- [추가] 시간 패턴 ---
+        if hasattr(df.index, 'hour'):
+            feat['hour'] = df.index.hour
+        else:
+            feat['hour'] = 12  # fallback
+
+        # --- [추가] 가격 모멘텀 가속도 ---
+        feat['momentum_accel'] = feat.get('return_1d', close.pct_change(1)*100).diff()
+
+        # --- [추가] 거래량 가격 상관 (5일) ---
+        feat['vol_price_corr'] = close.rolling(5).corr(volume)
+
+        # --- [추가] 고가/저가 범위 비율 ---
+        feat['hl_range_pct'] = ((high - low) / close) * 100
+
+        # --- [추가] RSI 변화율 (모멘텀의 모멘텀) ---
+        feat['rsi_change'] = feat['rsi'].diff()
+
+        # --- [추가] 연속 양봉/음봉 수 ---
+        is_up = (close > open_p).astype(int)
+        groups = (is_up != is_up.shift()).cumsum()
+        feat['consecutive_candles'] = is_up.groupby(groups).cumsum() - (1 - is_up).groupby(groups).cumsum()
+
         # NaN 제거
         feat = feat.replace([np.inf, -np.inf], np.nan)
         return feat
@@ -219,21 +242,27 @@ class MLPredictor:
             y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
             model = XGBClassifier(
-                n_estimators=200,
-                max_depth=5,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_weight=5,
-                gamma=0.1,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
+                n_estimators=300,
+                max_depth=4,
+                learning_rate=0.03,
+                subsample=0.75,
+                colsample_bytree=0.7,
+                min_child_weight=10,
+                gamma=0.2,
+                reg_alpha=0.3,
+                reg_lambda=2.0,
+                scale_pos_weight=1.0,
                 random_state=42,
                 eval_metric='logloss',
                 verbosity=0,
             )
 
-            model.fit(X_train, y_train)
+            # Early stopping으로 과적합 방지
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_test, y_test)],
+                verbose=False,
+            )
 
             train_acc = model.score(X_train, y_train) * 100
             test_acc = model.score(X_test, y_test) * 100

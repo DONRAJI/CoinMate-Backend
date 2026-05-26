@@ -185,8 +185,8 @@ class Backtester:
             max_balance = capital
             mdd = 0
 
-            TRAILING_ACT = 2.0
-            TRAILING_DIST = 1.5
+            TRAILING_ACT = 1.5
+            TRAILING_DIST = 1.2
 
             days_to_test = min(90, len(df) - 20)
             start_idx = len(df) - days_to_test
@@ -206,8 +206,8 @@ class Backtester:
                 regime = res.get('regime', 'normal')
                 is_sideways = regime == 'sideways'
 
-                stop_loss = -2.0 if is_sideways else -2.5
-                profit_target = 2.5 if is_sideways else 4.0
+                stop_loss = -1.5 if is_sideways else -2.0
+                profit_target = 2.0 if is_sideways else 3.5
 
                 # 매도 판단
                 if shares > 0:
@@ -227,7 +227,7 @@ class Backtester:
                         sell = True
                     elif profit > 2.0 and (rsi >= 80 or mfi >= 85):
                         sell = True
-                    elif score < 2.5 and profit < 0:
+                    elif score < 3.0 and profit < -0.5:
                         sell = True
 
                     if sell:
@@ -244,7 +244,13 @@ class Backtester:
 
                 # 매수 판단
                 overheated = rsi >= 75 or mfi >= 85 or (rsi >= 65 and mfi < 35)
-                if score >= self.strategy.BUY_THRESHOLD and not overheated and shares == 0:
+                # 급등 필터 (직전 3봉 +5% 이상)
+                recent_surge = False
+                if i >= 3:
+                    p3_ago = float(df.iloc[i-3]['close'])
+                    if p3_ago > 0 and ((price - p3_ago) / p3_ago) * 100 >= 5.0:
+                        recent_surge = True
+                if score >= self.strategy.BUY_THRESHOLD and not overheated and not recent_surge and shares == 0:
                     shares = (balance * (1 - self.fee)) / next_open
                     balance = 0
                     avg_buy = next_open

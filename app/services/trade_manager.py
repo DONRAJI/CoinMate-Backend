@@ -176,13 +176,22 @@ class TradeManager:
             regime = res.get('regime', 'normal')
             is_sideways = regime == 'sideways'
 
-            # 레짐별 매도 파라미터
+            # ATR 기반 동적 손절/익절
+            atr = res.get('atr', 0)
+            atr_pct = (atr / buy_price * 100) if buy_price > 0 and atr > 0 else 0
+
             if is_sideways:
-                stop_loss = -1.5
-                profit_target = 2.0
+                # 횡보장: 기본 타이트 + ATR 보정
+                stop_loss = max(-1.5, -(atr_pct * 1.0)) if atr_pct > 0 else -1.5
+                profit_target = max(2.0, atr_pct * 1.5) if atr_pct > 0 else 2.0
             else:
-                stop_loss = self.STOP_LOSS
-                profit_target = self.PROFIT_TARGET
+                # 추세장/일반: ATR 기반 동적 또는 기본값
+                if atr_pct > 0:
+                    stop_loss = max(self.STOP_LOSS, -(atr_pct * 1.2))   # ATR 1.2배, 기본값 이하로는 안 내림
+                    profit_target = max(self.PROFIT_TARGET, atr_pct * 2.0)  # ATR 2배
+                else:
+                    stop_loss = self.STOP_LOSS
+                    profit_target = self.PROFIT_TARGET
 
             # 보유 시간 계산 (시간 기반 탈출용)
             bought_at = trade['buy_time'] if 'buy_time' in trade.keys() else None
