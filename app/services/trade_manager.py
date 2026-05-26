@@ -1,7 +1,9 @@
 import asyncio
 import time
 import gc
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
 
 from app.core.trade_repository import TradeRepository
 from app.core.logger import get_logger
@@ -113,7 +115,7 @@ class TradeManager:
                     await self.refresh_target_scores()
                     self.cleanup_old_cache()
                 
-                now = datetime.now()
+                now = datetime.now(KST)
                 if now.hour == 0 and now.minute == 1 and loop_count % 60 == 0:
                     asyncio.create_task(self.backtester.run_daily_scan())
                     self.sell_timestamps.clear()
@@ -184,7 +186,7 @@ class TradeManager:
                         bought_time = dt.fromisoformat(bought_at)
                     else:
                         bought_time = bought_at
-                    holding_hours = (dt.now() - bought_time).total_seconds() / 3600
+                    holding_hours = (dt.now(KST) - bought_time.replace(tzinfo=KST)).total_seconds() / 3600
                 except Exception:
                     pass
 

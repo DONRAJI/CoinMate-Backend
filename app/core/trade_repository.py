@@ -1,6 +1,11 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from app.core.database import DB_PATH
+
+KST = timezone(timedelta(hours=9))
+
+def now_kst():
+    return datetime.now(KST)
 
 class TradeRepository:
     def get_conn(self):
@@ -38,7 +43,7 @@ class TradeRepository:
                     INSERT INTO trades (ticker, buy_price, buy_amount, buy_time, status, strategy_name) 
                     VALUES (?, ?, ?, ?, 'open', ?)
                     """,
-                    (ticker, price, amount, datetime.now(), strategy_name)
+                    (ticker, price, amount, now_kst(), strategy_name)
                 )
                 conn.commit()
                 print(f"💾 [DB] {ticker} 매수 기록 완료 (전략: {strategy_name})")
@@ -70,7 +75,7 @@ class TradeRepository:
                     SET status='closed', sell_price=?, sell_time=?, sell_reason=?, profit_rate=? 
                     WHERE id=?
                     """,
-                    (sell_price, datetime.now(), reason, profit_rate, trade_id)
+                    (sell_price, now_kst(), reason, profit_rate, trade_id)
                 )
                 conn.commit()
                 print(f"💾 [DB] 거래ID {trade_id} 매도 완료 (수익률: {profit_rate:.2f}%)")
@@ -84,7 +89,7 @@ class TradeRepository:
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE trades SET status='closed', sell_price=0, sell_time=? WHERE id=?",
-                    (datetime.now(), trade_id)
+                    (now_kst(), trade_id)
                 )
                 conn.commit()
         except Exception as e:

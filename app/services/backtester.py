@@ -3,7 +3,9 @@ import pyupbit
 import pandas as pd
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
 from app.services.strategy import Strategy
 
 # 캐시 디렉토리 설정
@@ -29,10 +31,10 @@ class Backtester:
         self.semaphore = asyncio.Semaphore(10) 
 
     def get_today_filename(self):
-        return os.path.join(CACHE_DIR, f"analysis_{datetime.now().strftime('%Y-%m-%d')}.json")
+        return os.path.join(CACHE_DIR, f"analysis_{datetime.now(KST).strftime('%Y-%m-%d')}.json")
 
     def get_report_filename(self):
-        return os.path.join(CACHE_DIR, f"report_{datetime.now().strftime('%Y-%m-%d')}.txt")
+        return os.path.join(CACHE_DIR, f"report_{datetime.now(KST).strftime('%Y-%m-%d')}.txt")
 
     async def run_daily_scan(self): 
         if self.is_running: 
@@ -97,7 +99,7 @@ class Backtester:
             
             with open(report_file, "w", encoding="utf-8") as f:
                 f.write(f"=== CoinMate AI Analysis Report ===\n")
-                f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Date: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Total Coins: {len(sorted_items)}\n")
                 f.write("="*105 + "\n")
                 f.write(f"{'Rank':<4} | {'Ticker':<10} | {'Score':<5} | {'WinRate':<7} | {'Yield':<8} | {'MDD':<6} | {'RSI':<5} | {'Price':<10}\n")
