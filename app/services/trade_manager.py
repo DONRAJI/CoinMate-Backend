@@ -10,6 +10,7 @@ from app.core.logger import get_logger
 from app.services.order_executor import OrderExecutor
 from app.services.strategy import Strategy
 from app.services.backtester import Backtester
+from app.services.ml_predictor import MLPredictor
 from app.services import notifier
 from app.core.database import init_db
 import pyupbit
@@ -24,6 +25,8 @@ class TradeManager:
         self.executor = OrderExecutor(self.repo)
         self.strategy = Strategy()
         self.backtester = Backtester()
+        self.ml = MLPredictor()
+        self.ML_MIN_PROB = 0.55  # ML 최소 상승 확률
         
         self.is_active = False
         self.shared_data = {}
@@ -299,6 +302,17 @@ class TradeManager:
                 print(f"  🚫 [Skip] {ticker}: RSI/MFI괴리(RSI:{rsi:.1f},MFI:{mfi:.1f})")
                 continue
 
+            # ML 예측 필터
+            if self.ml.is_trained:
+                ml_prob = self.ml.predict(df_day)
+                res['ml_prob'] = ml_prob
+                if ml_prob < self.ML_MIN_PROB:
+                    print(f"  🤖 [Skip] {ticker}: ML확률부족({ml_prob:.1%})")
+                    continue
+                print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%}")
+            else:
+                res['ml_prob'] = 0.5
+
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
             last_high = df_min['high'].iloc[-1]
@@ -325,7 +339,7 @@ class TradeManager:
         
         # --- [3] 점수 가중 예산 배분 + 매수 실행 ---
         if candidates and can_buy:
-            candidates.sort(key=lambda x: (x['score'], x['mfi']), reverse=True)
+            candidates.sort(key=lambda x: (x.get('ml_prob', 0.5), x['score']), reverse=True)
             final_picks = candidates[:empty_slots]
 
             total_score = sum(p['score'] for p in final_picks)
@@ -349,7 +363,8 @@ class TradeManager:
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
 
-                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / 예산:{budget:.0f}원) -> 매수")
+                ml_p = pick.get('ml_prob', 0.5)
+                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / 예산:{budget:.0f}원) -> 매수")
 
                 success = await self.executor.try_buy(ticker, price, budget, strategy_name)
                 if success:

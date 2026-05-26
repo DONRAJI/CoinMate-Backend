@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
 from app.services.strategy import Strategy
+from app.services.ml_predictor import MLPredictor
 
 # 캐시 디렉토리 설정
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "cache")
@@ -25,7 +26,9 @@ class Backtester:
         if self.initialized: return
         self.fee = 0.0005  # 업비트 수수료 (0.05%)
         self.strategy = Strategy()
+        self.ml = MLPredictor()
         self.results_cache = {}
+        self.ohlcv_cache = {}  # ML 학습용 OHLCV 저장
         self.is_running = False
         self.initialized = True
         self.semaphore = asyncio.Semaphore(10) 
@@ -81,6 +84,11 @@ class Backtester:
                 
                 self._save_report_txt()
                 print(f">>> 💾 [Save] 저장 완료 ({len(self.results_cache)}개)")
+
+                # ML 모델 학습 (수집한 OHLCV 활용)
+                if self.ohlcv_cache:
+                    await asyncio.to_thread(self.ml.train, self.ohlcv_cache)
+                    self.ohlcv_cache.clear()  # 메모리 해제
         except Exception as e:
             print(f">>> ❌ [Scan Error] {e}")
         finally:
@@ -129,6 +137,9 @@ class Backtester:
         try:
             df = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=200)
             if df is None or len(df) < 50: return
+
+            # ML 학습용 OHLCV 저장
+            self.ohlcv_cache[ticker] = df.copy()
 
             df_for_backtest = df.iloc[:-1].copy() 
 
