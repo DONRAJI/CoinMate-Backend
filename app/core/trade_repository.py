@@ -120,12 +120,13 @@ class TradeRepository:
                     SUM(CASE WHEN profit_rate <= 0 THEN 1 ELSE 0 END) as losses,
                     ROUND(AVG(profit_rate), 2) as avg_profit,
                     ROUND(MAX(profit_rate), 2) as best_trade,
-                    ROUND(MIN(profit_rate), 2) as worst_trade
+                    ROUND(MIN(profit_rate), 2) as worst_trade,
+                    ROUND(SUM(buy_amount * (profit_rate / 100.0)), 0) as total_pnl
                 FROM trades WHERE status='closed'
             """)
             row = cursor.fetchone()
             if not row or row['total'] == 0:
-                return {"total": 0, "wins": 0, "losses": 0, "avg_profit": 0, "win_rate": 0}
+                return {"total": 0, "wins": 0, "losses": 0, "avg_profit": 0, "win_rate": 0, "total_pnl": 0}
             return {
                 "total": row['total'],
                 "wins": row['wins'] or 0,
@@ -134,4 +135,5 @@ class TradeRepository:
                 "best_trade": row['best_trade'] or 0,
                 "worst_trade": row['worst_trade'] or 0,
                 "win_rate": round((row['wins'] or 0) / row['total'] * 100, 1),
+                "total_pnl": int(row['total_pnl'] or 0),
             }
