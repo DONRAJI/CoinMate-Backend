@@ -309,12 +309,9 @@ class TradeManager:
                 print(f"  🚫 [Skip] {ticker}: RSI/MFI괴리(RSI:{rsi:.1f},MFI:{mfi:.1f})")
                 continue
 
-            # ML 예측 필터 (위에서 이미 계산됨)
-            ml_prob = res.get('ml_prob')
-            if self.ml.is_trained and ml_prob is not None:
-                if ml_prob < self.ML_MIN_PROB:
-                    print(f"  🤖 [Skip] {ticker}: ML확률부족({ml_prob:.1%})")
-                    continue
+            # ML 예측 (정렬 우선순위용 — 차단하지 않음)
+            ml_prob = res.get('ml_prob') or 0.5
+            if self.ml.is_trained:
                 print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%}")
 
             last_open = df_min['open'].iloc[-1]
