@@ -379,9 +379,11 @@ class TradeManager:
                     await asyncio.sleep(0.2)
 
     async def place_manual_buy(self, ticker, krw_amount):
-        """수동 매수 (시장가)"""
+        """수동 매수 (시장가). krw_amount=0이면 전량 매수"""
         try:
             current_krw = self.executor.get_krw_balance()
+            if krw_amount <= 0:
+                krw_amount = current_krw * 0.9995  # 전량 매수 (수수료 여유분)
             if current_krw < krw_amount:
                 return {"status": "error", "message": f"잔액 부족 (보유: {current_krw:,.0f}원)"}
             
