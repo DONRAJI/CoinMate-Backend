@@ -121,7 +121,10 @@ class TradeRepository:
                     ROUND(AVG(profit_rate), 2) as avg_profit,
                     ROUND(MAX(profit_rate), 2) as best_trade,
                     ROUND(MIN(profit_rate), 2) as worst_trade,
-                    ROUND(SUM(buy_amount * (profit_rate / 100.0)), 0) as total_pnl
+                    ROUND(SUM(
+                        COALESCE(buy_amount * (profit_rate / 100.0), 0)
+                        - buy_amount * 0.001
+                    ), 0) as total_pnl
                 FROM trades WHERE status='closed'
             """)
             row = cursor.fetchone()
