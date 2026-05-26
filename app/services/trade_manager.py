@@ -47,8 +47,8 @@ class TradeManager:
         self.MIN_ORDER_KRW = 6000
         self.CACHE_TTL_SECONDS = 300
         self.MIN_OHLCV_INTERVAL = 60
-        self.PROFIT_TARGET = 3.0
-        self.STOP_LOSS = -3.0
+        self.PROFIT_TARGET = 4.0
+        self.STOP_LOSS = -2.5
         self.TRAILING_ACTIVATION = 2.0
         self.TRAILING_DISTANCE = 1.5
         self.high_watermarks = {}
@@ -170,8 +170,8 @@ class TradeManager:
 
             # 레짐별 매도 파라미터
             if is_sideways:
-                stop_loss = -2.5
-                profit_target = 2.0
+                stop_loss = -2.0
+                profit_target = 2.5
             else:
                 stop_loss = self.STOP_LOSS
                 profit_target = self.PROFIT_TARGET
@@ -207,14 +207,14 @@ class TradeManager:
             elif is_sideways and holding_hours >= 48 and profit_rate < 1.0:
                 reason = f"횡보탈출({holding_hours:.0f}h,{profit_rate:.2f}%)"
 
-            # 5. 수익권 과열 체크
-            elif profit_rate > 0.5:
+            # 5. 수익권 과열 체크 (최소 2% 이상 수익일 때만)
+            elif profit_rate > 2.0:
                 if res['rsi'] >= 80: reason = f"RSI과열({profit_rate:.2f}%)"
                 elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
 
-            # 6. 전략 점수 급락
-            elif res['score'] < 2.5:
-                reason = f"점수하락({res['score']}점)"
+            # 6. 전략 점수 급락 (손실 중일 때만 — 수익 중이면 홀딩)
+            elif res['score'] < 2.5 and profit_rate < 0:
+                reason = f"점수하락({res['score']}점,{profit_rate:.2f}%)"
 
             # 7. 이상 징후 (강한 괴리만)
             elif res['rsi'] < 40 and res.get('mfi', 0) >= 85:

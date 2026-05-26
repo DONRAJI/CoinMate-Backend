@@ -195,8 +195,8 @@ class Backtester:
                 regime = res.get('regime', 'normal')
                 is_sideways = regime == 'sideways'
 
-                stop_loss = -2.5 if is_sideways else -3.0
-                profit_target = 2.0 if is_sideways else 3.0
+                stop_loss = -2.0 if is_sideways else -2.5
+                profit_target = 2.5 if is_sideways else 4.0
 
                 # 매도 판단
                 if shares > 0:
@@ -214,9 +214,9 @@ class Backtester:
                         sell = True
                     elif is_sideways and days_held >= 2 and profit < 1.0:
                         sell = True
-                    elif profit > 0.5 and (rsi >= 80 or mfi >= 85):
+                    elif profit > 2.0 and (rsi >= 80 or mfi >= 85):
                         sell = True
-                    elif score < 2.5:
+                    elif score < 2.5 and profit < 0:
                         sell = True
 
                     if sell:
