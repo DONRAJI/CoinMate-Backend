@@ -120,9 +120,16 @@ class TradeManager:
                     asyncio.create_task(self.backtester.run_daily_scan())
                     self.sell_timestamps.clear()
 
-                await self.process_selling()
-                if self.is_active:
-                    await self.process_buying()
+                # 야간 매매 제한 (22시~07시 KST)
+                is_night = now.hour >= 22 or now.hour < 7
+
+                if is_night:
+                    # 야간: 손절만 허용 (process_selling 내부에서 손절 외 매도 제한)
+                    await self.process_selling(night_mode=True)
+                else:
+                    await self.process_selling()
+                    if self.is_active:
+                        await self.process_buying()
                 
                 self.update_frontend_cache()
                 
@@ -134,11 +141,9 @@ class TradeManager:
                 asyncio.create_task(notifier.notify_error("MainLoop", str(e)))
                 await asyncio.sleep(5)
 
-    async def process_selling(self):
+    async def process_selling(self, night_mode=False):
         """
-        [수정 내역]
-        기존: for trade_id, ticker, buy_price, _, _ in open_trades:
-        변경: for trade in open_trades: ... trade['id']
+        night_mode=True: 손절만 실행 (야간 보호)
         """
         open_trades = self.repo.get_open_trades()
         
@@ -191,9 +196,13 @@ class TradeManager:
                     pass
 
             reason = ""
-            # 1. 손절 (최우선)
+            # 1. 손절 (최우선 — 야간에도 실행)
             if profit_rate <= stop_loss:
                 reason = f"손절방어({profit_rate:.2f}%,{regime})"
+
+            # 야간 모드: 손절 외 매도 차단
+            elif night_mode:
+                pass
 
             # 2. 트레일링 스탑 (강한 추세일 때만)
             elif is_strong_trend and profit_rate >= self.TRAILING_ACTIVATION and drawdown_from_high >= self.TRAILING_DISTANCE:
