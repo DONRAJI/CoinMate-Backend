@@ -50,10 +50,10 @@ class TradeManager:
         self.MIN_ORDER_KRW = 6000
         self.CACHE_TTL_SECONDS = 300
         self.MIN_OHLCV_INTERVAL = 60
-        self.PROFIT_TARGET = 4.0
-        self.STOP_LOSS = -2.5
-        self.TRAILING_ACTIVATION = 2.0
-        self.TRAILING_DISTANCE = 1.5
+        self.PROFIT_TARGET = 3.5
+        self.STOP_LOSS = -2.0
+        self.TRAILING_ACTIVATION = 1.5
+        self.TRAILING_DISTANCE = 1.2
         self.high_watermarks = {}
         
         self.STRATEGY_MAP = {
@@ -178,8 +178,8 @@ class TradeManager:
 
             # 레짐별 매도 파라미터
             if is_sideways:
-                stop_loss = -2.0
-                profit_target = 2.5
+                stop_loss = -1.5
+                profit_target = 2.0
             else:
                 stop_loss = self.STOP_LOSS
                 profit_target = self.PROFIT_TARGET
@@ -225,7 +225,7 @@ class TradeManager:
                 elif res.get('mfi', 0) >= 85: reason = f"MFI과열({profit_rate:.2f}%)"
 
             # 6. 전략 점수 급락 (손실 중일 때만 — 수익 중이면 홀딩)
-            elif res['score'] < 2.5 and profit_rate < 0:
+            elif res['score'] < 3.0 and profit_rate < -0.5:
                 reason = f"점수하락({res['score']}점,{profit_rate:.2f}%)"
 
             # 7. 이상 징후 (강한 괴리만)
@@ -313,6 +313,36 @@ class TradeManager:
                 print(f"  🚫 [Skip] {ticker}: RSI/MFI괴리(RSI:{rsi:.1f},MFI:{mfi:.1f})")
                 self._set_skip_reason(ticker, f"⚠️ RSI/MFI 괴리")
                 continue
+
+            # === 급등 직후 진입 차단 (고점 물림 방지) ===
+            # 직전 3봉(3시간) 동안의 가격 상승률 확인
+            if len(df_min) >= 4:
+                price_3h_ago = df_min['close'].iloc[-4]
+                recent_surge = ((current - price_3h_ago) / price_3h_ago) * 100 if price_3h_ago > 0 else 0
+                if recent_surge >= 5.0:
+                    print(f"  🚫 [Skip] {ticker}: 직전급등({recent_surge:.1f}% in 3h)")
+                    self._set_skip_reason(ticker, f"🚀 직전 급등 ({recent_surge:.1f}%)")
+                    continue
+
+            # 직전 1봉(1시간) 급등 — 더 타이트하게
+            if len(df_min) >= 2:
+                price_1h_ago = df_min['close'].iloc[-2]
+                recent_1h = ((current - price_1h_ago) / price_1h_ago) * 100 if price_1h_ago > 0 else 0
+                if recent_1h >= 3.0:
+                    print(f"  🚫 [Skip] {ticker}: 1시간급등({recent_1h:.1f}%)")
+                    self._set_skip_reason(ticker, f"🚀 1시간 급등 ({recent_1h:.1f}%)")
+                    continue
+
+            # === 고점 근접 진입 차단 ===
+            # 현재가가 직전 6봉(6시간) 최고가 대비 98% 이상이면 고점 진입
+            if len(df_min) >= 6:
+                recent_high = df_min['high'].iloc[-6:].max()
+                if recent_high > 0:
+                    high_ratio = current / recent_high
+                    if high_ratio >= 0.98:
+                        print(f"  🚫 [Skip] {ticker}: 고점근접(6h최고대비 {high_ratio:.1%})")
+                        self._set_skip_reason(ticker, f"📈 고점 근접 ({high_ratio:.1%})")
+                        continue
 
             # ML 예측 (정렬 우선순위용 — 차단하지 않음)
             ml_prob = res.get('ml_prob') or 0.5
