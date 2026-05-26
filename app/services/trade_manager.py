@@ -367,7 +367,7 @@ class TradeManager:
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
 
-                ml_p = pick.get('ml_prob', 0.5)
+                ml_p = pick.get('ml_prob') or 0.5
                 log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / 예산:{budget:.0f}원) -> 매수")
 
                 success = await self.executor.try_buy(ticker, price, budget, strategy_name)
