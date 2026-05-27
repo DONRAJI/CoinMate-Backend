@@ -39,14 +39,17 @@ class Backtester:
     def get_report_filename(self):
         return os.path.join(CACHE_DIR, f"report_{datetime.now(KST).strftime('%Y-%m-%d')}.txt")
 
-    async def run_daily_scan(self): 
-        if self.is_running: 
+    async def run_daily_scan(self):
+        if self.is_running:
             print(">>> ⚠️ 이미 스캔이 진행 중입니다.")
             return
-        
+
         cache_file = self.get_today_filename()
         need_scan = True
-        
+
+        # 0. 전일 ML 예측 정확도 평가
+        await self._evaluate_yesterday_predictions()
+
         # 1. 캐시 파일 확인
         if os.path.exists(cache_file):
             print(f">>> 📂 [Cache] 로드 중: {os.path.basename(cache_file)}")
@@ -56,13 +59,13 @@ class Backtester:
                 if data and isinstance(data, dict) and len(data) > 0:
                     self.results_cache = data
                     print(f">>> ✅ [Cache] 로드 성공! ({len(self.results_cache)}개 코인)")
-                    
+
                     if not os.path.exists(self.get_report_filename()):
                         self._save_report_txt()
                     need_scan = False
                 else:
                     print(f">>> ⚠️ [Cache] 비어있음. 재분석.")
-            except Exception as e: 
+            except Exception as e:
                 print(f">>> ⚠️ [Cache] 오류 ({e}). 재분석.")
         else:
             print(f">>> 🆕 [Cache] 파일 없음. 신규 분석 시작.")
@@ -72,7 +75,7 @@ class Backtester:
         # 2. 풀 스캔 시작
         self.is_running = True
         print(f">>> 🔎 [Full Scan] 전 종목 정밀 분석 시작... (약 1~2분 소요)")
-        
+
         try:
             tickers = pyupbit.get_tickers(fiat="KRW")
             tasks = [self._analyze_one_safe(ticker) for ticker in tickers]
@@ -81,7 +84,7 @@ class Backtester:
             if self.results_cache:
                 with open(cache_file, 'w', encoding='utf-8') as f:
                     json.dump(self.results_cache, f, ensure_ascii=False, indent=4)
-                
+
                 self._save_report_txt()
                 print(f">>> 💾 [Save] 저장 완료 ({len(self.results_cache)}개)")
 
@@ -93,6 +96,104 @@ class Backtester:
             print(f">>> ❌ [Scan Error] {e}")
         finally:
             self.is_running = False
+
+    async def _evaluate_yesterday_predictions(self):
+        """전일 ML 예측과 실제 가격 변동을 비교하여 정확도 기록"""
+        try:
+            yesterday = (datetime.now(KST) - timedelta(days=1)).strftime('%Y-%m-%d')
+            yesterday_file = os.path.join(CACHE_DIR, f"analysis_{yesterday}.json")
+            accuracy_file = os.path.join(CACHE_DIR, "ml_accuracy_log.json")
+
+            if not os.path.exists(yesterday_file):
+                return
+
+            with open(yesterday_file, 'r', encoding='utf-8') as f:
+                yesterday_data = json.load(f)
+
+            # 이미 평가했는지 확인
+            accuracy_log = []
+            if os.path.exists(accuracy_file):
+                with open(accuracy_file, 'r', encoding='utf-8') as f:
+                    accuracy_log = json.load(f)
+                evaluated_dates = {entry['date'] for entry in accuracy_log}
+                if yesterday in evaluated_dates:
+                    return
+
+            # ML 확률이 있는 코인만 추출
+            ml_predictions = {
+                t: d for t, d in yesterday_data.items()
+                if d.get('ml_prob') is not None
+            }
+            if not ml_predictions:
+                return
+
+            # 현재 가격 조회
+            tickers = list(ml_predictions.keys())
+            current_prices = await asyncio.to_thread(pyupbit.get_current_price, tickers)
+            if current_prices is None:
+                return
+            if isinstance(current_prices, (float, int)):
+                current_prices = {tickers[0]: current_prices}
+
+            # 예측 vs 실제 비교
+            correct = 0
+            total = 0
+            details = []
+            for ticker, pred in ml_predictions.items():
+                curr_price = current_prices.get(ticker)
+                if curr_price is None:
+                    continue
+                pred_price = pred.get('current_price', 0)
+                if pred_price <= 0:
+                    continue
+
+                actual_change_pct = ((curr_price - pred_price) / pred_price) * 100
+                ml_prob = pred['ml_prob']
+                predicted_up = ml_prob >= 0.5
+                actual_up = actual_change_pct >= 1.0  # 1%+ 상승이 label 기준
+
+                if predicted_up == actual_up:
+                    correct += 1
+                total += 1
+
+                details.append({
+                    "ticker": ticker,
+                    "ml_prob": round(ml_prob, 4),
+                    "predicted_up": predicted_up,
+                    "actual_change_pct": round(actual_change_pct, 2),
+                    "actual_up": actual_up,
+                    "correct": predicted_up == actual_up,
+                })
+
+            if total == 0:
+                return
+
+            accuracy = round(correct / total * 100, 1)
+
+            # 상위 확률 코인의 실제 성과
+            top_10 = sorted(details, key=lambda x: x['ml_prob'], reverse=True)[:10]
+            top_10_correct = sum(1 for d in top_10 if d['correct'])
+            top_10_avg_change = round(sum(d['actual_change_pct'] for d in top_10) / len(top_10), 2) if top_10 else 0
+
+            entry = {
+                "date": yesterday,
+                "total_evaluated": total,
+                "correct": correct,
+                "accuracy_pct": accuracy,
+                "top10_accuracy_pct": round(top_10_correct / len(top_10) * 100, 1) if top_10 else 0,
+                "top10_avg_change_pct": top_10_avg_change,
+                "top10_details": top_10,
+            }
+
+            accuracy_log.append(entry)
+            with open(accuracy_file, 'w', encoding='utf-8') as f:
+                json.dump(accuracy_log, f, ensure_ascii=False, indent=2)
+
+            print(f">>> 📊 [ML Accuracy] {yesterday}: {accuracy}% ({correct}/{total})")
+            print(f">>>    Top10 정확도: {entry['top10_accuracy_pct']}%, 평균 변동: {top_10_avg_change}%")
+
+        except Exception as e:
+            print(f">>> ⚠️ [ML Accuracy Error] {e}")
 
     def _save_report_txt(self):
         try:
@@ -151,6 +252,14 @@ class Backtester:
 
             strategies = {k: int(v) for k, v in strategy_res['strategies'].items()}
             
+            # ML 확률 계산 (학습된 모델이 있을 때)
+            ml_prob = None
+            if self.ml.is_trained:
+                try:
+                    ml_prob = float(self.ml.predict(df))
+                except Exception:
+                    ml_prob = None
+
             self.results_cache[ticker] = {
                 "ticker": ticker,
                 "win_rate": float(result['win_rate']),
@@ -168,6 +277,7 @@ class Backtester:
                 "score_breakdown": strategy_res.get("score_breakdown", []),
                 "regime": strategy_res.get("regime", "normal"),
                 "adx": strategy_res.get("adx", 0),
+                "ml_prob": ml_prob,
             }
         except Exception:
             pass
@@ -272,10 +382,19 @@ class Backtester:
     def get_best_opportunities(self, top_n=5):
         candidates = list(self.results_cache.values())
         candidates = [c for c in candidates if c['score'] > 0]
-        
+
         sorted_cands = sorted(
-            candidates, 
-            key=lambda x: (x['score'], x['win_rate'], x['total_yield']), 
+            candidates,
+            key=lambda x: (x['score'], x['win_rate'], x['total_yield']),
             reverse=True
         )
         return [c['ticker'] for c in sorted_cands[:top_n]]
+
+    def get_ml_top_coins(self, top_n=10):
+        """ML 상승 확률이 높은 코인 Top N 반환 (일일 스캔 결과 기반)"""
+        candidates = [
+            c for c in self.results_cache.values()
+            if c.get('ml_prob') is not None and c['ml_prob'] > 0.5
+        ]
+        sorted_cands = sorted(candidates, key=lambda x: x['ml_prob'], reverse=True)
+        return sorted_cands[:top_n]

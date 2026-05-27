@@ -75,3 +75,20 @@ def get_coin_status(ticker: str):
 def get_ml_status():
     """ML 모델 상태 조회"""
     return {"status": "success", "data": trade_manager.ml.get_status()}
+
+@router.get("/ml/accuracy")
+def get_ml_accuracy():
+    """ML 예측 정확도 로그 조회"""
+    import os, json
+    accuracy_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "cache", "ml_accuracy_log.json"
+    )
+    if not os.path.exists(accuracy_file):
+        return {"status": "success", "data": []}
+    try:
+        with open(accuracy_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

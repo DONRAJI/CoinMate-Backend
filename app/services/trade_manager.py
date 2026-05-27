@@ -900,8 +900,38 @@ class TradeManager:
             
             items_list.append(item)
 
+        # ML Top 코인 (일일 스캔 기반, 프론트 전용)
+        ml_top_coins = []
+        try:
+            raw_ml_top = self.backtester.get_ml_top_coins(top_n=10)
+            existing_tickers = {item['ticker'] for item in items_list}
+            for c in raw_ml_top:
+                ticker = c['ticker']
+                if ticker in existing_tickers:
+                    continue
+                realtime_price = 0
+                if self.shared_data and ticker in self.shared_data:
+                    realtime_price = self.shared_data[ticker].get('current_price', 0)
+                ml_top_coins.append({
+                    "ticker": ticker,
+                    "price": realtime_price or c.get('current_price', 0),
+                    "score": c.get('score', 0),
+                    "ml_prob": c.get('ml_prob'),
+                    "rsi": c.get('rsi', 50),
+                    "target": c.get('target_price', 0),
+                    "reasons": [],
+                    "category": "ML 상승예측",
+                    "regime": c.get('regime', 'normal'),
+                    "adx": c.get('adx', 0),
+                    "ml_top_reasons": [],
+                    "skip_reason": None,
+                })
+        except Exception as e:
+            print(f"⚠️ [ML Top Coins Error] {e}")
+
         self.frontend_cache = {
             "data": items_list,
+            "ml_top_coins": ml_top_coins,
             "summary": {
                 "krw_balance": total_krw,
                 "total_assets": total_krw + total_coin_val,

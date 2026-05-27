@@ -400,13 +400,16 @@ class MLPredictor:
 
     def predict_with_reasons(self, df: pd.DataFrame) -> dict:
         """
-        상승 확률 + 주요 근거 반환
-        Returns: { prob: float, reasons: [{ name, label, value, impact }] }
+        상승 확률 + 코인별 SHAP 기여도 기반 주요 근거 반환
+        XGBoost pred_contribs를 사용하여 개별 예측에 대한 피처 기여도를 계산
+        Returns: { prob: float, reasons: [{ name, label, value, shap, direction }] }
         """
         if not self.is_trained or self.model is None:
             return {"prob": 0.5, "reasons": []}
 
         try:
+            import xgboost as xgb
+
             features = self.build_features(df)
             if features.empty:
                 return {"prob": 0.5, "reasons": []}
@@ -418,26 +421,30 @@ class MLPredictor:
 
             prob = float(self.model.predict_proba(last_row)[0][1])
 
-            # SHAP 스타일 피처 기여도 계산 (근사치: 피처중요도 × 피처값 방향)
-            importances = self.model.feature_importances_
+            # --- 개별 예측 SHAP 기여도 (pred_contribs) ---
+            dmatrix = xgb.DMatrix(last_row, feature_names=self.feature_names)
+            # contribs shape: (1, n_features + 1) — 마지막 값은 bias
+            contribs = self.model.get_booster().predict(dmatrix, pred_contribs=True)
+            shap_values = contribs[0][:-1]  # bias 제외
             values = last_row.values[0]
+
             reasons = []
             for i, fname in enumerate(self.feature_names):
-                imp = float(importances[i])
+                shap_val = float(shap_values[i])
                 val = float(values[i])
                 label = self.FEATURE_LABELS.get(fname, fname)
-                # 양수 값 = 상승 기여, 음수 값 = 하락 기여 (대부분 피처)
-                direction = "up" if val > 0 else "down" if val < 0 else "neutral"
+                # SHAP 양수 = 상승 확률에 기여, 음수 = 하락 방향 기여
+                direction = "up" if shap_val > 0.01 else "down" if shap_val < -0.01 else "neutral"
                 reasons.append({
                     "name": fname,
                     "label": label,
-                    "value": round(val, 2),
-                    "importance": round(imp, 4),
+                    "value": round(val, 4),
+                    "shap": round(shap_val, 4),
                     "direction": direction,
                 })
 
-            # 중요도 순으로 정렬, 상위 8개
-            reasons.sort(key=lambda x: x["importance"], reverse=True)
+            # |SHAP| 절대값 순 정렬 → 이 코인에 가장 영향을 준 피처 상위 8개
+            reasons.sort(key=lambda x: abs(x["shap"]), reverse=True)
             top_reasons = reasons[:8]
 
             return {"prob": prob, "reasons": top_reasons}
