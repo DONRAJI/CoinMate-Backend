@@ -1,8 +1,9 @@
 """
-ML 예측 모델 (XGBoost)
-- 과거 OHLCV + 기술적 지표로 "다음날 상승 확률" 예측
+ML 예측 모델 (XGBoost) v2
+- 과거 OHLCV + 기술적 지표로 "의미 있는 상승(1%+) 확률" 예측
 - 기존 앙상블 점수 위에 추가 필터로 사용
 - 하루 1회 전 종목 데이터로 학습, 매수 판단 시 예측
+- v2: 레이블 개선 (1%+ 상승), 피처 추가 (38개), 클래스 균형 처리
 """
 import os
 import numpy as np
@@ -17,6 +18,9 @@ if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
 
 MODEL_PATH = os.path.join(MODEL_DIR, "xgb_model.pkl")
+
+# 레이블 임계값: 다음날 고가 기준 이 이상 상승하면 1
+LABEL_THRESHOLD_PCT = 1.0
 
 
 class MLPredictor:
@@ -187,6 +191,48 @@ class MLPredictor:
         groups = (is_up != is_up.shift()).cumsum()
         feat['consecutive_candles'] = is_up.groupby(groups).cumsum() - (1 - is_up).groupby(groups).cumsum()
 
+        # --- [v2] 거래대금 (volume * close) ---
+        trade_value = volume * close
+        tv_ma20 = trade_value.rolling(20).mean().replace(0, 1)
+        feat['trade_value_ratio'] = trade_value / tv_ma20
+
+        # --- [v2] OBV (On-Balance Volume) 변화율 ---
+        obv = (np.sign(close.diff()) * volume).cumsum()
+        obv_ma10 = obv.rolling(10).mean().replace(0, 0.0001)
+        feat['obv_ratio'] = (obv / obv_ma10 - 1) * 100
+
+        # --- [v2] 지지/저항 근접도 ---
+        high_20 = high.rolling(20).max()
+        low_20 = low.rolling(20).min()
+        price_range = (high_20 - low_20).replace(0, 0.0001)
+        feat['support_resistance_pos'] = (close - low_20) / price_range
+
+        # --- [v2] 변동성 수축/확장 (BB Width) ---
+        bb_width = (4 * bb_std) / bb_ma.replace(0, 0.0001) * 100
+        bb_width_ma = bb_width.rolling(10).mean().replace(0, 0.0001)
+        feat['bb_width_ratio'] = bb_width / bb_width_ma
+
+        # --- [v2] 거래량 트렌드 (5일 vs 20일) ---
+        vol_ma5 = volume.rolling(5).mean().replace(0, 1)
+        feat['vol_trend'] = vol_ma5 / vol_ma20
+
+        # --- [v2] 가격-거래량 다이버전스 ---
+        price_up = close.diff() > 0
+        vol_down = volume.diff() < 0
+        feat['price_vol_divergence'] = (price_up & vol_down).astype(int)
+
+        # --- [v2] 이동평균 정배열/역배열 점수 ---
+        ma_align = (
+            (ma5 > ma10).astype(int) +
+            (ma10 > ma20).astype(int) +
+            (close > ma5).astype(int)
+        )
+        feat['ma_alignment'] = ma_align
+
+        # --- [v2] 하락 후 반등 패턴 ---
+        feat['drawdown_5d'] = (close / high.rolling(5).max() - 1) * 100
+        feat['bounce_from_low'] = (close / low.rolling(5).min() - 1) * 100
+
         # NaN 제거
         feat = feat.replace([np.inf, -np.inf], np.nan)
         return feat
@@ -213,8 +259,10 @@ class MLPredictor:
                 if features.empty:
                     continue
 
-                # 정답: 다음날 종가가 오늘보다 높으면 1, 아니면 0
-                y = (df['close'].shift(-1) > df['close']).astype(int)
+                # 정답: 다음날 고가가 오늘 종가 대비 LABEL_THRESHOLD_PCT% 이상 상승하면 1
+                next_high = df['high'].shift(-1)
+                gain_pct = ((next_high - df['close']) / df['close']) * 100
+                y = (gain_pct >= LABEL_THRESHOLD_PCT).astype(int)
 
                 # 마지막 행(다음날 없음)과 NaN 행 제거
                 valid_mask = features.notna().all(axis=1) & y.notna()
@@ -241,6 +289,12 @@ class MLPredictor:
             X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
             y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
+            # 클래스 불균형 처리
+            neg_count = (y_train == 0).sum()
+            pos_count = (y_train == 1).sum()
+            spw = neg_count / max(pos_count, 1)
+            print(f"    클래스 비율: 상승={pos_count} / 하락={neg_count} (scale_pos_weight={spw:.2f})")
+
             model = XGBClassifier(
                 n_estimators=300,
                 max_depth=4,
@@ -251,7 +305,7 @@ class MLPredictor:
                 gamma=0.2,
                 reg_alpha=0.3,
                 reg_lambda=2.0,
-                scale_pos_weight=1.0,
+                scale_pos_weight=spw,
                 random_state=42,
                 eval_metric='logloss',
                 verbosity=0,
@@ -278,15 +332,41 @@ class MLPredictor:
             top_idx = np.argsort(importances)[-10:][::-1]
             top_features = [(self.feature_names[i], importances[i]) for i in top_idx]
 
-            print(f">>> 🤖 [ML] 학습 완료!")
+            # 정밀도/재현율 계산
+            from sklearn.metrics import precision_score, recall_score, f1_score
+            y_pred_test = model.predict(X_test)
+            precision = precision_score(y_test, y_pred_test, zero_division=0) * 100
+            recall = recall_score(y_test, y_pred_test, zero_division=0) * 100
+            f1 = f1_score(y_test, y_pred_test, zero_division=0) * 100
+
+            print(f">>> 🤖 [ML] 학습 완료! (v2: {LABEL_THRESHOLD_PCT}%+ 상승 예측)")
             print(f"    학습 데이터: {len(X_train)}행 / 테스트: {len(X_test)}행")
             print(f"    학습 정확도: {train_acc:.1f}% / 테스트 정확도: {test_acc:.1f}%")
+            print(f"    정밀도: {precision:.1f}% / 재현율: {recall:.1f}% / F1: {f1:.1f}%")
             print(f"    상위 피처: {', '.join(f'{n}({v:.3f})' for n, v in top_features[:5])}")
 
         except Exception as e:
             print(f">>> ❌ [ML] 학습 실패: {e}")
             import traceback
             traceback.print_exc()
+
+    # 피처 이름 → 한글 설명 매핑
+    FEATURE_LABELS = {
+        'return_1d': '1일 수익률', 'return_3d': '3일 수익률', 'return_5d': '5일 수익률', 'return_10d': '10일 수익률',
+        'ma5_ratio': 'MA5 이격도', 'ma10_ratio': 'MA10 이격도', 'ma20_ratio': 'MA20 이격도', 'ma5_ma20_cross': 'MA 골든크로스',
+        'rsi': 'RSI', 'mfi': 'MFI 자금흐름', 'macd_diff': 'MACD 차이', 'macd_ratio': 'MACD 비율',
+        'adx': 'ADX 추세강도', 'di_diff': 'DI 방향', 'bb_position': '볼린저 위치',
+        'vol_ratio': '거래량 폭발', 'vol_change': '거래량 변화', 'atr_ratio': 'ATR 변동성',
+        'body_ratio': '캔들 몸통', 'upper_wick': '윗꼬리', 'is_bullish': '양봉 여부',
+        'volatility_5d': '5일 변동성', 'volatility_10d': '10일 변동성',
+        'momentum_accel': '모멘텀 가속', 'vol_price_corr': '거래량-가격 상관',
+        'hl_range_pct': '고저 범위', 'rsi_change': 'RSI 변화',
+        'consecutive_candles': '연속 양봉/음봉', 'trade_value_ratio': '거래대금 비율',
+        'obv_ratio': 'OBV 비율', 'support_resistance_pos': '지지/저항 위치',
+        'bb_width_ratio': 'BB 수축/확장', 'vol_trend': '거래량 추세',
+        'price_vol_divergence': '가격-거래량 괴리', 'ma_alignment': '이평선 정배열',
+        'drawdown_5d': '5일 낙폭', 'bounce_from_low': '저점 반등', 'hour': '시간대',
+    }
 
     def predict(self, df: pd.DataFrame) -> float:
         """
@@ -318,6 +398,54 @@ class MLPredictor:
             print(f"⚠️ [ML Predict Error] {e}")
             return 0.5
 
+    def predict_with_reasons(self, df: pd.DataFrame) -> dict:
+        """
+        상승 확률 + 주요 근거 반환
+        Returns: { prob: float, reasons: [{ name, label, value, impact }] }
+        """
+        if not self.is_trained or self.model is None:
+            return {"prob": 0.5, "reasons": []}
+
+        try:
+            features = self.build_features(df)
+            if features.empty:
+                return {"prob": 0.5, "reasons": []}
+
+            last_row = features.iloc[[-1]]
+            if last_row.isna().any(axis=1).iloc[0]:
+                last_row = last_row.fillna(0)
+            last_row = last_row.reindex(columns=self.feature_names, fill_value=0)
+
+            prob = float(self.model.predict_proba(last_row)[0][1])
+
+            # SHAP 스타일 피처 기여도 계산 (근사치: 피처중요도 × 피처값 방향)
+            importances = self.model.feature_importances_
+            values = last_row.values[0]
+            reasons = []
+            for i, fname in enumerate(self.feature_names):
+                imp = float(importances[i])
+                val = float(values[i])
+                label = self.FEATURE_LABELS.get(fname, fname)
+                # 양수 값 = 상승 기여, 음수 값 = 하락 기여 (대부분 피처)
+                direction = "up" if val > 0 else "down" if val < 0 else "neutral"
+                reasons.append({
+                    "name": fname,
+                    "label": label,
+                    "value": round(val, 2),
+                    "importance": round(imp, 4),
+                    "direction": direction,
+                })
+
+            # 중요도 순으로 정렬, 상위 8개
+            reasons.sort(key=lambda x: x["importance"], reverse=True)
+            top_reasons = reasons[:8]
+
+            return {"prob": prob, "reasons": top_reasons}
+
+        except Exception as e:
+            print(f"⚠️ [ML Predict Reasons Error] {e}")
+            return {"prob": 0.5, "reasons": []}
+
     def get_status(self) -> dict:
         """모델 상태 반환 (API/프론트 표시용)"""
         return {
@@ -325,4 +453,6 @@ class MLPredictor:
             "accuracy": self.train_score,
             "train_date": self.train_date or "-",
             "features": len(self.feature_names),
+            "version": "v2",
+            "label_threshold": LABEL_THRESHOLD_PCT,
         }

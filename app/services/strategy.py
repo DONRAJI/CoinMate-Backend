@@ -4,17 +4,18 @@ import numpy as np
 
 class Strategy:
     def __init__(self):
-        # 총점: 13.5점 만점 (백테스트 검증 완료)
+        # 총점: 12.75점 만점
+        # [개선 3] volume 가중치 하향 (1.5→0.75): 거래량 폭발이 고점 추격을 유발
         self.WEIGHTS = {
             "trend": 2.5,            # MA20 추세 방향
             "adx": 1.5,              # 추세 강도
             "macd": 2.5,             # 모멘텀 (골든크로스)
-            "volume": 1.5,           # 거래량 폭발
+            "volume": 0.75,          # 거래량 폭발 (하향: 1.5→0.75)
             "vwap": 1.0,             # 세력 평단가
             "oscillator_group": 3.0, # RSI/MFI 통합
             "bollinger": 1.5,        # 밴드 반등
         }
-        self.BUY_THRESHOLD = 6.0
+        self.BUY_THRESHOLD = 5.5  # 총점 하향에 맞춰 조정 (6.0→5.5)
 
     def get_ensemble_signal(self, df_day: pd.DataFrame, df_min: pd.DataFrame = None, debug=False):
         """

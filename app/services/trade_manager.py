@@ -45,6 +45,25 @@ class TradeManager:
 
         self.REBUY_COOLDOWN = 1800
 
+        # ═══ [개선 1] 심야 매수 차단 (22~07시 KST) ═══
+        self.NIGHT_BUY_BLOCK_START = 22  # 22시부터
+        self.NIGHT_BUY_BLOCK_END = 7     # 07시까지
+
+        # ═══ [개선 2] 연속 손절 쿨오프 ═══
+        self.recent_trade_results = []    # 최근 거래 결과 (True=승, False=패)
+        self.CONSECUTIVE_LOSS_LIMIT = 3   # N연패 시 매수 중단
+        self.loss_cooloff_until = 0       # 쿨오프 해제 시간 (timestamp)
+        self.LOSS_COOLOFF_SECONDS = 3600  # 1시간 매수 중단
+
+        # ═══ [개선 4] 최소 보유 시간 ═══
+        self.MIN_HOLD_MINUTES = 30        # 매수 후 30분간 점수하락 매도 차단
+
+        # ═══ [개선 5] 코인별 연속 손절 블랙리스트 ═══
+        self.coin_loss_streak = {}        # {ticker: 연속 손실 횟수}
+        self.coin_blacklist_until = {}    # {ticker: 블랙리스트 해제 시간}
+        self.COIN_LOSS_STREAK_LIMIT = 2   # 같은 코인 2연패 시 블랙리스트
+        self.COIN_BLACKLIST_SECONDS = 7200  # 2시간 블랙리스트
+
         # 설정값
         self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
@@ -124,15 +143,15 @@ class TradeManager:
                     self.sell_timestamps.clear()
 
                 # 야간 매매 제한 (22시~07시 KST)
-                is_night = now.hour >= 22 or now.hour < 7
+                is_night = now.hour >= self.NIGHT_BUY_BLOCK_START or now.hour < self.NIGHT_BUY_BLOCK_END
 
                 if is_night:
-                    # 야간: 손절만 허용 (process_selling 내부에서 손절 외 매도 제한)
+                    # 야간: 손절만 허용, 매수 완전 차단 (process_buying 내부에서도 이중 차단)
                     await self.process_selling(night_mode=True)
                 else:
                     await self.process_selling()
                     if self.is_active:
-                        await self.process_buying()
+                        await self.process_buying()  # 내부에서 심야+쿨오프+블랙리스트 체크
                 
                 self.update_frontend_cache()
                 
@@ -252,6 +271,11 @@ class TradeManager:
                 reason = "anomaly"
                 reason_detail = "설거지감지"
 
+            # ═══ [개선 4] 최소 보유 시간: 30분 미만이면 점수하락/이상징후 매도 차단 ═══
+            if reason in ("score_drop", "anomaly") and holding_hours < (self.MIN_HOLD_MINUTES / 60):
+                reason = ""  # 매도 취소 — 아직 보유 시간 부족
+                log.info(f"[홀딩] {ticker}: {reason}이나 보유 {holding_hours*60:.0f}분 < {self.MIN_HOLD_MINUTES}분 → 매도 보류")
+
             # --- [매도 실행] ---
             if reason and self.is_active:
                 sell_reason_full = f"{reason}({reason_detail})" if reason_detail else reason
@@ -265,20 +289,63 @@ class TradeManager:
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
+                    # ═══ [개선 2] 연속 손절 추적 ═══
+                    is_loss = profit_rate <= 0
+                    self.recent_trade_results.append(not is_loss)
+                    if len(self.recent_trade_results) > 10:
+                        self.recent_trade_results = self.recent_trade_results[-10:]
+
+                    # 최근 N건 연속 패배 체크
+                    consecutive_losses = 0
+                    for r in reversed(self.recent_trade_results):
+                        if not r:
+                            consecutive_losses += 1
+                        else:
+                            break
+
+                    if consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+                        self.loss_cooloff_until = time.time() + self.LOSS_COOLOFF_SECONDS
+                        log.warning(f"[쿨오프] {consecutive_losses}연패 감지! {self.LOSS_COOLOFF_SECONDS//60}분간 매수 중단")
+                        asyncio.create_task(notifier.notify_error(
+                            "연속손절 쿨오프",
+                            f"{consecutive_losses}연패 → {self.LOSS_COOLOFF_SECONDS//60}분 매수 중단"
+                        ))
+
+                    # ═══ [개선 5] 코인별 연속 손절 블랙리스트 ═══
+                    if is_loss:
+                        self.coin_loss_streak[ticker] = self.coin_loss_streak.get(ticker, 0) + 1
+                        if self.coin_loss_streak[ticker] >= self.COIN_LOSS_STREAK_LIMIT:
+                            self.coin_blacklist_until[ticker] = time.time() + self.COIN_BLACKLIST_SECONDS
+                            log.warning(f"[블랙리스트] {ticker}: {self.coin_loss_streak[ticker]}연패 → {self.COIN_BLACKLIST_SECONDS//3600}시간 차단")
+                    else:
+                        self.coin_loss_streak[ticker] = 0  # 승리 시 연패 초기화
+
     async def process_buying(self):
+        # ═══ [개선 1] 심야 매수 차단 ═══
+        now_hour = datetime.now(KST).hour
+        if now_hour >= self.NIGHT_BUY_BLOCK_START or now_hour < self.NIGHT_BUY_BLOCK_END:
+            return  # 22시~07시 매수 완전 차단
+
+        # ═══ [개선 2] 연속 손절 쿨오프 체크 ═══
+        if time.time() < self.loss_cooloff_until:
+            remaining = int((self.loss_cooloff_until - time.time()) / 60)
+            if remaining % 10 == 0 and remaining > 0:  # 10분마다 로그
+                print(f"  🧊 [쿨오프] 연속손절 쿨오프 중... 매수 재개까지 {remaining}분")
+            return
+
         # --- [1] 먼저 예산/슬롯 확인 ---
         active_cnt = self.repo.get_trade_count()
         empty_slots = self.MAX_COIN_COUNT - active_cnt
-        
+
         krw = self.executor.get_krw_balance()
         can_buy = (empty_slots > 0) and (krw >= self.MIN_ORDER_KRW)
-        
+
         available_krw = krw * 0.99 if can_buy else 0
         MAX_SINGLE_RATIO = 0.4
 
         # --- [2] 종목 스캔 & 점수 업데이트 ---
         candidates = []
-        
+
         for ticker in self.target_coins:
             last_sell = self.sell_timestamps.get(ticker, 0)
             is_cooldown = (time.time() - last_sell < self.REBUY_COOLDOWN)
@@ -290,12 +357,18 @@ class TradeManager:
             res = self.strategy.get_ensemble_signal(df_day, df_min)
             if not res: continue
 
-            # ML 예측 (UI 표시용 — 모든 종목)
+            # ML 예측 + 근거 (UI 표시용 — 모든 종목)
             if self.ml.is_trained:
-                ml_prob = self.ml.predict(df_day)
-                res['ml_prob'] = ml_prob
+                ml_result = self.ml.predict_with_reasons(df_day)
+                res['ml_prob'] = ml_result['prob']
+                # 카드에 표시할 상위 3개 근거 (라벨만)
+                res['ml_top_reasons'] = [
+                    {"label": r["label"], "direction": r["direction"], "value": r["value"]}
+                    for r in ml_result['reasons'][:3]
+                ]
             else:
                 res['ml_prob'] = None
+                res['ml_top_reasons'] = []
 
             # UI용 상태 업데이트
             self._update_market_status(ticker, current, res)
@@ -308,6 +381,17 @@ class TradeManager:
                 print(f"  ⏳ [Skip] {ticker}: 쿨타임")
                 self._set_skip_reason(ticker, "⏳ 쿨타임")
                 continue
+
+            # ═══ [개선 5] 코인별 블랙리스트 체크 ═══
+            blacklist_until = self.coin_blacklist_until.get(ticker, 0)
+            if time.time() < blacklist_until:
+                remaining_min = int((blacklist_until - time.time()) / 60)
+                self._set_skip_reason(ticker, f"🚫 연속손절 차단 ({remaining_min}분)")
+                continue
+            elif blacklist_until > 0:
+                # 블랙리스트 해제 → 정리
+                self.coin_blacklist_until.pop(ticker, None)
+                self.coin_loss_streak.pop(ticker, None)
 
             # --- 매수 후보 필터링 로직 ---
             res['ticker'] = ticker
@@ -365,10 +449,14 @@ class TradeManager:
                         self._set_skip_reason(ticker, f"📈 고점 근접 ({high_ratio:.1%})")
                         continue
 
-            # ML 예측 (정렬 우선순위용 — 차단하지 않음)
+            # ML 예측 (v2: 낮은 확률이면 차단)
             ml_prob = res.get('ml_prob') or 0.5
             if self.ml.is_trained:
                 print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%}")
+                if ml_prob < self.ML_MIN_PROB:
+                    print(f"  🚫 [Skip] {ticker}: ML 확률 낮음 ({ml_prob:.1%} < {self.ML_MIN_PROB:.0%})")
+                    self._set_skip_reason(ticker, f"🤖 ML 확률 낮음 ({ml_prob:.0%})")
+                    continue
 
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
@@ -751,6 +839,7 @@ class TradeManager:
                 "regime": result.get('regime', 'normal'),
                 "adx": result.get('adx', 0),
                 "ml_prob": result.get('ml_prob', None),
+                "ml_top_reasons": result.get('ml_top_reasons', []),
                 "skip_reason": None,
             })
             
