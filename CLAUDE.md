@@ -11,14 +11,26 @@
 ## 인프라
 | 항목 | 값 |
 |------|-----|
-| 백엔드 | Python 3.11 + FastAPI, EC2 t3.micro (1GB RAM) |
+| 백엔드 | Python 3.11 + FastAPI, EC2 t3.micro (1GB RAM + 스왑 2GB) |
 | EC2 IP | 15.134.82.85 |
+| EC2 사용자/경로 | `ec2-user`, `/home/ec2-user/CoinMate-Backend` |
 | PEM 키 | `F:\Downloads\coinmate.pem` |
 | 프론트엔드 | React 19 + TypeScript + Vite, Vercel 자동배포 |
-| 리버스 프록시 | Caddy |
+| 프론트 URL | https://coin-mate-frontend.vercel.app |
+| 도메인(API) | coinmate1.duckdns.org (Caddy 리버스 프록시 → :8000) |
 | 백엔드 repo | github.com/DONRAJI/CoinMate-Backend |
 | 프론트 repo | github.com/DONRAJI/CoinMate-frontend |
-| DB | SQLite (`coin_mate.db`) |
+| DB | SQLite (`coin_mate.db`, WAL 모드) |
+
+### 환경변수
+- **EC2 `.env`** (`~/CoinMate-Backend/.env`): `UPBIT_ACCESS_KEY`, `UPBIT_SECRET_KEY`, `MAX_BUY_AMOUNT`, `DISCORD_WEBHOOK_URL`, `API_KEY`(쓰기 인증), `ALLOWED_ORIGINS`(CORS)
+- **Vercel**: `VITE_API_URL`(백엔드 주소), `VITE_API_KEY`(= EC2 API_KEY와 동일, 쓰기 인증)
+- ⚠️ API_KEY는 git 비커밋. 키 교체 시 EC2 `.env` + Vercel 둘 다 변경 후 각각 재시작/재배포
+
+### systemd 서비스/타이머 (EC2)
+- `coinmate.service` — 메인 봇 (start/stop/restart/status)
+- `db-backup.timer` — 매일 자정 DB 백업
+- `coinmate-health.timer` — 5분마다 헬스체크 → Discord (`scripts/health_check.sh` → `~/health_check.sh`)
 
 ## 배포 명령어
 ```bash
@@ -457,16 +469,62 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 
 ---
 
-## 당장 해야 하는 개선점 (긴급)
+### 세션 7 (5/28): P0 보안/안정성 개선 (완료)
 
-### 🔴 P0: 서버 안정성 & 보안
-| 항목 | 현황 | 리스크 | 해결책 |
-|------|------|--------|--------|
-| API 인증 없음 | 누구나 `/trade/manual/buy` 호출 가능 | 자금 탈취 가능 | API Key 또는 JWT 인증 추가 |
-| t3.micro 메모리 | 풀스캔 시 1GB RAM 근접 | OOM → 서버 다운 (이미 경험) | t3.small 업그레이드 또는 스왑 파일 추가 |
-| SQLite 동시 접근 | 매매 루프 + API가 동시 쓰기 | DB lock 에러 | WAL 모드 활성화 또는 PostgreSQL 전환 |
-| 서버 다운 알림 없음 | 텔레그램은 매매만 알림 | 몇 시간째 다운돼도 모름 | 헬스체크 + 텔레그램 알림 (cron) |
-| CORS 미설정 | 모든 origin 허용 추정 | API 악용 가능 | 허용 도메인 제한 |
+5개 P0 항목 전부 적용·검증 완료.
+
+#### 1. 스왑 2GB (OOM 방지) ✅
+- EC2에 `/swapfile` 2GB 생성, `/etc/fstab` 영속화, `vm.swappiness=10`
+- 풀스캔(244종목) 시 메모리 부족분을 디스크로 흡수 → OOM 다운 방지
+- t3.small 유료 업그레이드는 추후 검토 (사용자 선택: 일단 스왑)
+
+#### 2. SQLite WAL 모드 ✅
+- `database.py init_db`: `PRAGMA journal_mode=WAL`, `synchronous=NORMAL`
+- `trade_repository.get_conn` + `data_loader`: `timeout=5.0` + `PRAGMA busy_timeout=5000`
+- 매매루프 쓰기 + API 읽기 동시 접근 시 lock 에러 방지 (WAL은 DB파일에 영속)
+
+#### 3. API 키 인증 (쓰기 엔드포인트만) ✅
+- `core/auth.py verify_api_key`: `X-API-Key` 헤더 == `config.API_KEY` 검증
+- 적용: `/trade/start`, `/stop`, `/manual/buy`, `/manual/sell`, `/config`(POST)
+- 읽기(prices/history/stats/analysis/config GET)는 개방 유지
+- `API_KEY` 미설정 시 통과(로컬 개발 호환) → EC2 `.env`에만 실제 키 존재
+- **프론트**: `marketApi.ts` + `CoinModal.tsx`가 `VITE_API_KEY`를 헤더로 전송
+- **키 보관 위치**: EC2 `.env`의 `API_KEY`, Vercel 환경변수 `VITE_API_KEY` (git 비커밋)
+- 검증: 키 없이 401, 키 있으면 200, 읽기 200
+- ⚠️ SPA 특성상 키가 브라우저 번들에 노출됨 — 완벽한 보안 아님(봇/스캐너 차단 + 키 교체 가능 수준). 멀티유저 전환 시 JWT 등으로 대체 필요
+
+#### 4. 헬스체크 다운 알림 ✅
+- `scripts/health_check.sh`: `/health` 2회 연속 비정상 시 Discord 1회 알림, 복구 시 복구 알림
+- systemd timer `coinmate-health.timer` (5분 간격, crontab 미설치라 timer 사용)
+- 상태파일 `/home/ec2-user/.health_state` (failcount alerted)
+
+#### 5. CORS 도메인 제한 ✅
+- `main.py`: `allow_origins=config.ALLOWED_ORIGINS` (env 쉼표구분, 미설정 시 `*` 폴백)
+- `allow_credentials`는 특정 origin일 때만 True (와일드카드와 동시 사용 불가)
+- EC2 `.env`: `ALLOWED_ORIGINS=https://coin-mate-frontend.vercel.app` (trailing slash 없이)
+- 검증: 허용 origin 헤더 반영, 비허용 차단, preflight OPTIONS에 x-api-key 허용
+
+#### 프론트 URL & 배포
+- 프론트엔드 운영 URL: **https://coin-mate-frontend.vercel.app**
+- 백엔드 배포: SCP + `systemctl restart coinmate`
+- Vercel 환경변수 추가 후에는 반드시 redeploy해야 빌드에 주입됨 (확인법: 배포된 번들 JS에 키 문자열 존재 여부 grep)
+
+#### ⚠️ 운영 주의 (세션7 추가)
+- 백엔드 재시작 시 자동매매는 항상 OFF로 시작 → 대시보드에서 재활성화 필요
+- `/trade/start`도 이제 인증 필요 → 프론트는 자동 처리, 수동 curl 시 `-H "X-API-Key: ..."` 필수
+
+---
+
+## 당장 해야 하는 개선점 (P1 — P0는 세션7에서 완료)
+
+### 🔴 P0: 서버 안정성 & 보안 — ✅ 전부 완료 (세션 7)
+| 항목 | 해결 |
+|------|------|
+| ~~API 인증 없음~~ | ✅ X-API-Key 쓰기 엔드포인트 보호 |
+| ~~t3.micro 메모리~~ | ✅ 스왑 2GB (t3.small은 추후 선택) |
+| ~~SQLite 동시 접근~~ | ✅ WAL 모드 + busy_timeout |
+| ~~서버 다운 알림 없음~~ | ✅ systemd timer 헬스체크 → Discord |
+| ~~CORS 미설정~~ | ✅ ALLOWED_ORIGINS 제한 |
 
 ### 🟡 P1: 데이터 품질 & 투명성
 | 항목 | 현황 | 개선 |
