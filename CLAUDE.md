@@ -154,6 +154,10 @@ src/
 | profit_rate | REAL | 수익률 (%) |
 | strategy_name | TEXT | 예: trend+macd+volume 또는 Manual(수동) |
 | sell_reason | TEXT | 예: stop_loss, trailing, Manual(수동) |
+| buy_score | REAL | [P1] 매수 시점 앙상블 점수 |
+| buy_ml_prob | REAL | [P1] 매수 시점 ML 상승확률 (수동매수는 NULL) |
+| buy_regime | TEXT | [P1] 매수 시점 BTC 레짐 (bull/neutral/bear) |
+| buy_rsi | REAL | [P1] 매수 시점 RSI (수동매수는 NULL) |
 
 ---
 
@@ -512,6 +516,32 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 #### ⚠️ 운영 주의 (세션7 추가)
 - 백엔드 재시작 시 자동매매는 항상 OFF로 시작 → 대시보드에서 재활성화 필요
 - `/trade/start`도 이제 인증 필요 → 프론트는 자동 처리, 수동 curl 시 `-H "X-API-Key: ..."` 필수
+
+---
+
+### 세션 8 (5/28): BTC 레짐 가시화 + P1 매수 컨텍스트 저장
+
+#### 1. BTC 시장 레짐 상태 바 (항상 표시)
+- `trade_manager._get_market_regime`: 레짐 판정 시 상세(`btc_price`, `ma24_dev_pct`, `mom6_pct`)를 `_market_regime_detail`에 저장
+- `update_frontend_cache`에서 `_get_market_regime()` 호출 (30분 캐시라 실제 조회는 30분마다) → 쿨오프/심야로 process_buying이 조기 return돼도 BTC 지표 항상 갱신
+- summary에 `market_regime`, `btc{...}`, `cooloff_remaining_min`, `night_block` 노출
+- **프론트**: 대시보드 상단에 항상 보이는 2개 칩
+  - BTC 레짐 칩: 🐂/😐/🐻 + 가격 + MA24이격% + 6h모멘텀%
+  - 매수 상태 칩: ✅ 매수 가능 / 🚫 차단(하락장·쿨오프 N분·심야 사유 표기)
+
+#### 2. [P1] 매수 시점 컨텍스트 저장
+- **DB**: trades 테이블에 `buy_score, buy_ml_prob, buy_regime, buy_rsi` 컬럼 추가
+  - `database.py`: CREATE TABLE에 포함 + 기존 DB용 마이그레이션(PRAGMA table_info로 누락 컬럼 ALTER ADD, idempotent)
+- **저장 경로**: `process_buying`에서 buy_context 생성 → `executor.try_buy(..., context)` → `repo.log_buy(..., context)`
+  - 수동 매수(`place_manual_buy`)도 regime 기록 (score/ml_prob/rsi는 None)
+- **표시**: TradeHistory에 "매수근거" 컬럼 (점수 / AI% / 레짐 이모지)
+- **활용**: 향후 "레짐=bear에서 산 거래 승률", "ml_prob 높을수록 승률 상관관계" 등 분석 → 레짐 필터/ML 임계값 튜닝 근거
+- 검증: EC2 마이그레이션 완료(4컬럼 확인), INSERT 컬럼/값 일치 확인
+
+#### P1 남은 항목 (미진행)
+- 전략별 성과 추적 (strategy_name 기반 집계) — 다음 후보
+- ML 모델 버전 관리 (날짜별 .pkl 보관 + 롤백)
+- 프론트 에러 로깅 (Sentry) — 외부 계정/DSN 필요
 
 ---
 
