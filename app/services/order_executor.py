@@ -28,7 +28,7 @@ class OrderExecutor:
             print(f"⚠️ [Avg Price] 조회 실패: {e}")
         return 0
 
-    async def try_buy(self, ticker, price, budget, strategy_name="Ensemble"):
+    async def try_buy(self, ticker, price, budget, strategy_name="Ensemble", context=None):
         print(f"🛒 [BUY Attempt] {ticker} ({budget:,.0f}원) 주문 시도...")
         buy_res = await asyncio.to_thread(self.upbit.buy_market_order, ticker, budget)
 
@@ -40,7 +40,7 @@ class OrderExecutor:
                 real_price = price  # fallback
 
             print(f"✅ [BUY Success] {ticker} 체결! 시그널:{price:,.0f} → 실제:{real_price:,.0f}")
-            self.repo.log_buy(ticker, real_price, budget, strategy_name)
+            self.repo.log_buy(ticker, real_price, budget, strategy_name, context)
             return True
         else:
             print(f"❌ [BUY Fail] {ticker} API 주문 실패")

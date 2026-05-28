@@ -35,20 +35,25 @@ class TradeRepository:
             return [r[0] for r in cursor.fetchall()]
 
     # 🔥 [수정 1] strategy_name 파라미터 추가
-    def log_buy(self, ticker, price, amount, strategy_name="Unknown"):
+    # 🔥 [P1] context: 매수 시점 score/ml_prob/regime/rsi 저장 (사후 분석용)
+    def log_buy(self, ticker, price, amount, strategy_name="Unknown", context=None):
         """매수 기록 저장"""
+        context = context or {}
         try:
             with self.get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO trades (ticker, buy_price, buy_amount, buy_time, status, strategy_name) 
-                    VALUES (?, ?, ?, ?, 'open', ?)
+                    INSERT INTO trades (ticker, buy_price, buy_amount, buy_time, status, strategy_name,
+                                        buy_score, buy_ml_prob, buy_regime, buy_rsi)
+                    VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
                     """,
-                    (ticker, price, amount, now_kst(), strategy_name)
+                    (ticker, price, amount, now_kst(), strategy_name,
+                     context.get('score'), context.get('ml_prob'),
+                     context.get('regime'), context.get('rsi'))
                 )
                 conn.commit()
-                print(f"💾 [DB] {ticker} 매수 기록 완료 (전략: {strategy_name})")
+                print(f"💾 [DB] {ticker} 매수 기록 완료 (전략: {strategy_name}, 점수: {context.get('score')}, 레짐: {context.get('regime')})")
         except Exception as e:
             print(f"⚠️ [DB Error] 매수 기록 실패: {e}")
 

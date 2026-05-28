@@ -608,7 +608,14 @@ class TradeManager:
                 ml_p = pick.get('ml_prob') or 0.5
                 log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / 예산:{budget:.0f}원) -> 매수")
 
-                success = await self.executor.try_buy(ticker, price, budget, strategy_name)
+                # 🔥 [P1] 매수 시점 컨텍스트 (사후 분석용)
+                buy_context = {
+                    "score": round(float(pick.get('score', 0)), 2),
+                    "ml_prob": round(float(pick['ml_prob']), 4) if pick.get('ml_prob') is not None else None,
+                    "regime": self._market_regime_cache or "neutral",
+                    "rsi": round(float(pick.get('rsi', 0)), 1),
+                }
+                success = await self.executor.try_buy(ticker, price, budget, strategy_name, buy_context)
                 if success:
                     available_krw -= budget
                     asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
@@ -628,7 +635,10 @@ class TradeManager:
             current_price = pyupbit.get_current_price(ticker)
             if not current_price:
                 return {"status": "error", "message": f"{ticker} 시세 조회 실패"}
-            success = await self.executor.try_buy(ticker, current_price, krw_amount, "Manual(수동)")
+            # 🔥 [P1] 수동 매수도 레짐 기록 (score/ml_prob은 없음)
+            manual_ctx = {"score": None, "ml_prob": None,
+                          "regime": self._market_regime_cache or "neutral", "rsi": None}
+            success = await self.executor.try_buy(ticker, current_price, krw_amount, "Manual(수동)", manual_ctx)
             
             if success:
                 if ticker in self.market_status:
