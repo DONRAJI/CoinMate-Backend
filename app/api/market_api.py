@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from app.services.trade_manager import trade_manager
+from app.services import notifier
 from app.core.auth import verify_api_key
 # Backtester, Strategy 임포트는 필요 없습니다 (TradeManager꺼 쓸 거니까)
 
@@ -94,6 +95,19 @@ def get_ml_accuracy():
         return {"status": "success", "data": data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+class ClientErrorReport(BaseModel):
+    message: str
+    stack: str | None = None
+    url: str | None = None
+
+@router.post("/client-error", dependencies=[Depends(verify_api_key)])
+async def report_client_error(req: ClientErrorReport):
+    """프론트엔드 런타임 에러를 Discord로 전달 (자체 에러 로깅)"""
+    msg = (req.message or "")[:300]
+    url = (req.url or "")[:200]
+    await notifier.notify_error("프론트엔드 에러", f"위치: {url}\n{msg}")
+    return {"status": "success"}
 
 @router.get("/ml/versions")
 def get_ml_versions():
