@@ -421,6 +421,42 @@ src/
 
 ---
 
+### 세션 6 (5/28): 9연속 손절 원인 분석 & 시장 레짐 필터
+
+#### 거래 분석 (마지막 승리 WLD +4.92% 이후 8연속 손절)
+- AKT, NXPC, SEI, JTO, FF, JTO, AZTEC, IN — 전부 -0.9~-2.9% stop_loss
+- **모든 코인이 매수 직후 하락** → 개별 코인 문제가 아닌 시장 전체 하락 신호
+
+#### 근본 원인: 시장 전체 추세(BTC) 필터 부재
+- BTC 3일 연속 하락 (5/26 -2.18%, 5/27 -2.56%, 5/28 -1.47%, 누적 -6.5%)
+- 시간봉 MA24 대비 -2.2%, 24h -3.68% → 명백한 하락장
+- 봇은 개별 코인 단기 상승신호(trend+adx+macd)만 보고 매수 → 하락장에서 알트는 BTC보다 더 빠져 전부 손절
+- 1시간 쿨오프는 미봉책 (끝나면 같은 하락장 재진입)
+- `recent_trade_results` 인메모리라 재시작 시 초기화됨
+
+#### 적용한 개선 (trade_manager.py)
+1. **[핵심] 시장 레짐 필터** `_get_market_regime()`
+   - BTC 시간봉 MA24 위치 + 6h 모멘텀으로 bull/neutral/bear 판정 (30분 캐시)
+   - bear: `현재가 < MA24 AND 6h모멘텀 < -1.0%` → `process_buying` 진입부에서 전체 매수 차단
+   - 데이터 실패 시 fail-open (neutral, 매수 허용), 직전 캐시 fallback
+2. **점진적 쿨오프** — 연패 지속 시 1h → 2h → 4h 강화 (`cooloff_level`, MAX 3단계), 승리 시 0으로 리셋
+3. **재시작 시 연패 복원** `_restore_loss_state()` — DB 최근 10건으로 `recent_trade_results` + 쿨오프 재구성
+4. **프론트 안내 배너** — summary에 `market_regime`, `cooloff_remaining_min` 추가, Dashboard 상단에 하락장/쿨오프 배너 표시
+
+#### 검증 결과 (배포 후)
+- 복원: "최근 거래 10건, 8연패" 정확히 인식
+- 쿨오프: 8연패 → cooloff_level 3 → 4시간(240분) 자동 적용
+- 레짐: "BTC레짐=bear (MA24 -2.3%, 6h -1.9%)" 정확히 감지 → 현재 매수 차단 중
+
+#### 신규 인스턴스 변수 (trade_manager.py __init__)
+```python
+self.cooloff_level = 0; self.MAX_COOLOFF_LEVEL = 3
+self._market_regime_cache = None; self._market_regime_ts = 0
+self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
+```
+
+---
+
 ## 당장 해야 하는 개선점 (긴급)
 
 ### 🔴 P0: 서버 안정성 & 보안

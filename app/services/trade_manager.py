@@ -49,11 +49,19 @@ class TradeManager:
         self.NIGHT_BUY_BLOCK_START = 22  # 22시부터
         self.NIGHT_BUY_BLOCK_END = 7     # 07시까지
 
-        # ═══ [개선 2] 연속 손절 쿨오프 ═══
+        # ═══ [개선 2] 연속 손절 쿨오프 (점진적 강화) ═══
         self.recent_trade_results = []    # 최근 거래 결과 (True=승, False=패)
         self.CONSECUTIVE_LOSS_LIMIT = 3   # N연패 시 매수 중단
         self.loss_cooloff_until = 0       # 쿨오프 해제 시간 (timestamp)
-        self.LOSS_COOLOFF_SECONDS = 3600  # 1시간 매수 중단
+        self.LOSS_COOLOFF_SECONDS = 3600  # 기본 1시간 (연패 지속 시 2h→4h로 강화)
+        self.cooloff_level = 0            # 쿨오프 강도 단계 (승리 시 0으로 리셋)
+        self.MAX_COOLOFF_LEVEL = 3        # 최대 4시간 (1h * 2^2)
+
+        # ═══ [개선 6] 시장 전체 추세(BTC) 필터 ═══
+        self._market_regime_cache = None  # "bull"/"neutral"/"bear"
+        self._market_regime_ts = 0
+        self.MARKET_REGIME_TTL = 1800     # 30분 캐시
+        self._last_bear_log = 0
 
         # ═══ [개선 4] 최소 보유 시간 ═══
         self.MIN_HOLD_MINUTES = 30        # 매수 후 30분간 점수하락 매도 차단
@@ -80,6 +88,68 @@ class TradeManager:
             "rsi": "RSI안정", "mfi": "자금유입", "bollinger": "밴드지지",
             "macd": "MACD", "adx": "강한추세", "vwap": "세력평단", "cci": "과매도탈출"
         }
+
+        # ═══ [개선 2-b] 재시작 시 연패 상태 복원 ═══
+        self._restore_loss_state()
+
+    def _restore_loss_state(self):
+        """재시작 시 DB의 최근 거래 결과로 연패 카운터 복원 (인메모리 초기화 방지)"""
+        try:
+            rows = self.repo.get_closed_trades(limit=10)
+            # sell_time DESC로 오니까 시간순으로 뒤집어서 저장
+            results = []
+            for r in reversed(rows):
+                pr = r['profit_rate'] if 'profit_rate' in r.keys() else None
+                if pr is None:
+                    continue
+                results.append(pr > 0)  # True=승, False=패
+            self.recent_trade_results = results[-10:]
+            consecutive = 0
+            for win in reversed(self.recent_trade_results):
+                if not win:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive > 0:
+                print(f">>> 🔁 [복원] 최근 거래 {len(self.recent_trade_results)}건, 현재 {consecutive}연패 상태")
+            if consecutive >= self.CONSECUTIVE_LOSS_LIMIT:
+                # 이미 연패 중이면 쿨오프도 복원
+                self.cooloff_level = min(consecutive - self.CONSECUTIVE_LOSS_LIMIT + 1, self.MAX_COOLOFF_LEVEL)
+                duration = self.LOSS_COOLOFF_SECONDS * (2 ** (self.cooloff_level - 1))
+                self.loss_cooloff_until = time.time() + duration
+                print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 {duration//60}분 적용")
+        except Exception as e:
+            print(f"⚠️ [Loss State Restore Error] {e}")
+
+    def _get_market_regime(self):
+        """BTC 기준 시장 전체 추세 판정 (bull/neutral/bear, 30분 캐시).
+        하락장에서 알트코인 동반 하락으로 인한 연속 손절을 막기 위한 게이트."""
+        now = time.time()
+        if self._market_regime_cache and (now - self._market_regime_ts < self.MARKET_REGIME_TTL):
+            return self._market_regime_cache
+        regime = "neutral"  # 데이터 실패 시 매수 허용(fail-open)
+        try:
+            df = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=48)
+            if df is not None and len(df) >= 25:
+                closes = df['close']
+                cur = closes.iloc[-1]
+                ma24 = closes.rolling(24).mean().iloc[-1]
+                mom6 = ((cur - closes.iloc[-7]) / closes.iloc[-7]) * 100 if closes.iloc[-7] > 0 else 0
+                if cur < ma24 and mom6 < -1.0:
+                    regime = "bear"
+                elif cur > ma24 and mom6 > 0:
+                    regime = "bull"
+                else:
+                    regime = "neutral"
+                self._market_regime_cache = regime
+                self._market_regime_ts = now
+                print(f">>> 🌐 [Market] BTC레짐={regime} (MA24이격 {(cur-ma24)/ma24*100:+.1f}%, 6h {mom6:+.1f}%)")
+        except Exception as e:
+            print(f"⚠️ [Market Regime Error] {e}")
+            # 에러 시 직전 캐시가 있으면 그것을 사용
+            if self._market_regime_cache:
+                return self._market_regime_cache
+        return regime
 
     def set_shared_data(self, shared_data, lock=None):
         self.shared_data = shared_data
@@ -289,11 +359,14 @@ class TradeManager:
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
-                    # ═══ [개선 2] 연속 손절 추적 ═══
+                    # ═══ [개선 2] 연속 손절 추적 (점진적 쿨오프) ═══
                     is_loss = profit_rate <= 0
                     self.recent_trade_results.append(not is_loss)
                     if len(self.recent_trade_results) > 10:
                         self.recent_trade_results = self.recent_trade_results[-10:]
+
+                    if not is_loss:
+                        self.cooloff_level = 0  # 승리 시 쿨오프 강도 초기화
 
                     # 최근 N건 연속 패배 체크
                     consecutive_losses = 0
@@ -304,11 +377,14 @@ class TradeManager:
                             break
 
                     if consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
-                        self.loss_cooloff_until = time.time() + self.LOSS_COOLOFF_SECONDS
-                        log.warning(f"[쿨오프] {consecutive_losses}연패 감지! {self.LOSS_COOLOFF_SECONDS//60}분간 매수 중단")
+                        # 연패가 지속될수록 쿨오프 강화: 1h → 2h → 4h
+                        self.cooloff_level = min(self.cooloff_level + 1, self.MAX_COOLOFF_LEVEL)
+                        duration = self.LOSS_COOLOFF_SECONDS * (2 ** (self.cooloff_level - 1))
+                        self.loss_cooloff_until = time.time() + duration
+                        log.warning(f"[쿨오프] {consecutive_losses}연패 감지! {duration//60}분간 매수 중단 (강도 {self.cooloff_level})")
                         asyncio.create_task(notifier.notify_error(
                             "연속손절 쿨오프",
-                            f"{consecutive_losses}연패 → {self.LOSS_COOLOFF_SECONDS//60}분 매수 중단"
+                            f"{consecutive_losses}연패 → {duration//60}분 매수 중단"
                         ))
 
                     # ═══ [개선 5] 코인별 연속 손절 블랙리스트 ═══
@@ -331,6 +407,14 @@ class TradeManager:
             remaining = int((self.loss_cooloff_until - time.time()) / 60)
             if remaining % 10 == 0 and remaining > 0:  # 10분마다 로그
                 print(f"  🧊 [쿨오프] 연속손절 쿨오프 중... 매수 재개까지 {remaining}분")
+            return
+
+        # ═══ [개선 6] 시장 전체 추세(BTC) 필터 — 하락장이면 전체 매수 차단 ═══
+        regime = self._get_market_regime()
+        if regime == "bear":
+            if time.time() - self._last_bear_log > 600:  # 10분마다 로그
+                print(f"  🐻 [Market] BTC 하락장 감지 → 신규 매수 전면 차단")
+                self._last_bear_log = time.time()
             return
 
         # --- [1] 먼저 예산/슬롯 확인 ---
@@ -929,13 +1013,20 @@ class TradeManager:
         except Exception as e:
             print(f"⚠️ [ML Top Coins Error] {e}")
 
+        # 시장 레짐 & 쿨오프 상태 (프론트 안내용)
+        cooloff_remaining = 0
+        if time.time() < self.loss_cooloff_until:
+            cooloff_remaining = int((self.loss_cooloff_until - time.time()) / 60)
+
         self.frontend_cache = {
             "data": items_list,
             "ml_top_coins": ml_top_coins,
             "summary": {
                 "krw_balance": total_krw,
                 "total_assets": total_krw + total_coin_val,
-                "coin_value": total_coin_val
+                "coin_value": total_coin_val,
+                "market_regime": self._market_regime_cache or "neutral",
+                "cooloff_remaining_min": cooloff_remaining
             }
         }
 
