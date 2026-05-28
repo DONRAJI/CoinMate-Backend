@@ -62,6 +62,7 @@ class TradeManager:
         self._market_regime_ts = 0
         self.MARKET_REGIME_TTL = 1800     # 30분 캐시
         self._last_bear_log = 0
+        self._market_regime_detail = {}   # {btc_price, ma24_dev_pct, mom6, updated} — 프론트 표시용
 
         # ═══ [개선 4] 최소 보유 시간 ═══
         self.MIN_HOLD_MINUTES = 30        # 매수 후 30분간 점수하락 매도 차단
@@ -143,7 +144,14 @@ class TradeManager:
                     regime = "neutral"
                 self._market_regime_cache = regime
                 self._market_regime_ts = now
-                print(f">>> 🌐 [Market] BTC레짐={regime} (MA24이격 {(cur-ma24)/ma24*100:+.1f}%, 6h {mom6:+.1f}%)")
+                ma24_dev = (cur - ma24) / ma24 * 100 if ma24 > 0 else 0
+                self._market_regime_detail = {
+                    "btc_price": float(cur),
+                    "ma24_dev_pct": round(ma24_dev, 2),
+                    "mom6_pct": round(mom6, 2),
+                    "updated_ts": now,
+                }
+                print(f">>> 🌐 [Market] BTC레짐={regime} (MA24이격 {ma24_dev:+.1f}%, 6h {mom6:+.1f}%)")
         except Exception as e:
             print(f"⚠️ [Market Regime Error] {e}")
             # 에러 시 직전 캐시가 있으면 그것을 사용
@@ -1014,9 +1022,16 @@ class TradeManager:
             print(f"⚠️ [ML Top Coins Error] {e}")
 
         # 시장 레짐 & 쿨오프 상태 (프론트 안내용)
+        # _get_market_regime은 30분 캐시 → 매 루프 호출해도 실제 조회는 30분마다.
+        # 쿨오프/심야로 process_buying이 조기 return돼도 BTC 지표가 항상 갱신되도록 여기서 호출.
+        regime = self._get_market_regime()
         cooloff_remaining = 0
         if time.time() < self.loss_cooloff_until:
             cooloff_remaining = int((self.loss_cooloff_until - time.time()) / 60)
+
+        # 심야 매수 차단 여부
+        now_hour = datetime.now(KST).hour
+        is_night_block = now_hour >= self.NIGHT_BUY_BLOCK_START or now_hour < self.NIGHT_BUY_BLOCK_END
 
         self.frontend_cache = {
             "data": items_list,
@@ -1025,8 +1040,10 @@ class TradeManager:
                 "krw_balance": total_krw,
                 "total_assets": total_krw + total_coin_val,
                 "coin_value": total_coin_val,
-                "market_regime": self._market_regime_cache or "neutral",
-                "cooloff_remaining_min": cooloff_remaining
+                "market_regime": regime or "neutral",
+                "btc": self._market_regime_detail,
+                "cooloff_remaining_min": cooloff_remaining,
+                "night_block": is_night_block,
             }
         }
 
