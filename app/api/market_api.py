@@ -1,5 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from app.services.trade_manager import trade_manager
+from app.core.auth import verify_api_key
 # Backtester, Strategy 임포트는 필요 없습니다 (TradeManager꺼 쓸 거니까)
 
 router = APIRouter()
@@ -92,3 +94,16 @@ def get_ml_accuracy():
         return {"status": "success", "data": data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@router.get("/ml/versions")
+def get_ml_versions():
+    """보관된 ML 모델 버전 목록 (최신순)"""
+    return {"status": "success", "data": trade_manager.ml.list_versions()}
+
+class RollbackRequest(BaseModel):
+    filename: str | None = None  # 미지정 시 직전 버전
+
+@router.post("/ml/rollback", dependencies=[Depends(verify_api_key)])
+def rollback_ml(req: RollbackRequest):
+    """ML 모델을 이전 버전으로 롤백 (쓰기 — 인증 필요)"""
+    return trade_manager.ml.rollback(req.filename)

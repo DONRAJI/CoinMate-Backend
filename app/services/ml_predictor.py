@@ -6,6 +6,9 @@ ML 예측 모델 (XGBoost) v2
 - v2: 레이블 개선 (1%+ 상승), 피처 추가 (38개), 클래스 균형 처리
 """
 import os
+import json
+import time
+import shutil
 import numpy as np
 import pandas as pd
 import joblib
@@ -18,6 +21,13 @@ if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
 
 MODEL_PATH = os.path.join(MODEL_DIR, "xgb_model.pkl")
+
+# 🔥 [P1] 모델 버전 관리
+VERSIONS_DIR = os.path.join(MODEL_DIR, "versions")
+if not os.path.exists(VERSIONS_DIR):
+    os.makedirs(VERSIONS_DIR)
+HISTORY_PATH = os.path.join(MODEL_DIR, "model_history.json")
+MAX_VERSIONS = 10  # 보관할 최대 버전 수
 
 # 레이블 임계값: 다음날 고가 기준 이 이상 상승하면 1
 LABEL_THRESHOLD_PCT = 1.0
@@ -58,16 +68,83 @@ class MLPredictor:
             print(f">>> ⚠️ [ML] 모델 로드 실패: {e}")
 
     def _save_model(self):
-        """모델 저장"""
+        """모델 저장 + 날짜별 버전 보관 (롤백 대비)"""
         try:
-            joblib.dump({
+            payload = {
                 'model': self.model,
                 'feature_names': self.feature_names,
                 'score': self.train_score,
                 'train_date': datetime.now(KST).strftime('%Y-%m-%d %H:%M'),
-            }, MODEL_PATH)
+            }
+            joblib.dump(payload, MODEL_PATH)
+
+            # 버전 보관 (재직렬화 대신 복사)
+            ver_name = f"xgb_model_{datetime.now(KST).strftime('%Y%m%d_%H%M%S')}.pkl"
+            shutil.copy2(MODEL_PATH, os.path.join(VERSIONS_DIR, ver_name))
+            self._append_history(ver_name, payload['train_date'], self.train_score, len(self.feature_names))
+            self._prune_versions()
+            print(f">>> 💾 [ML] 모델 저장 + 버전 보관: {ver_name}")
         except Exception as e:
             print(f">>> ⚠️ [ML] 모델 저장 실패: {e}")
+
+    def _append_history(self, filename, train_date, score, n_features):
+        hist = []
+        if os.path.exists(HISTORY_PATH):
+            try:
+                with open(HISTORY_PATH, encoding='utf-8') as f:
+                    hist = json.load(f)
+            except Exception:
+                hist = []
+        hist.append({
+            "file": filename,
+            "train_date": train_date,
+            "score": round(float(score), 2),
+            "features": n_features,
+            "ts": time.time(),
+        })
+        with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(hist[-50:], f, ensure_ascii=False, indent=2)
+
+    def _prune_versions(self):
+        """오래된 버전 정리 (최근 MAX_VERSIONS개만 유지)"""
+        try:
+            files = [os.path.join(VERSIONS_DIR, f) for f in os.listdir(VERSIONS_DIR) if f.endswith('.pkl')]
+            files.sort(key=os.path.getmtime, reverse=True)
+            for old in files[MAX_VERSIONS:]:
+                os.remove(old)
+        except Exception as e:
+            print(f">>> ⚠️ [ML] 버전 정리 실패: {e}")
+
+    def list_versions(self):
+        """보관된 모델 버전 메타데이터 목록 (최신순)"""
+        if os.path.exists(HISTORY_PATH):
+            try:
+                with open(HISTORY_PATH, encoding='utf-8') as f:
+                    return list(reversed(json.load(f)))
+            except Exception:
+                return []
+        return []
+
+    def rollback(self, filename=None):
+        """이전 모델 버전으로 롤백. filename 미지정 시 현재 직전 버전 사용."""
+        try:
+            files = sorted([f for f in os.listdir(VERSIONS_DIR) if f.endswith('.pkl')], reverse=True)
+            if not files:
+                return {"status": "error", "message": "보관된 버전이 없습니다"}
+            if filename is None:
+                # files[0]=현재(가장 최신 저장본), files[1]=직전
+                target = files[1] if len(files) >= 2 else files[0]
+            else:
+                if filename not in files:
+                    return {"status": "error", "message": f"버전을 찾을 수 없음: {filename}"}
+                target = filename
+            shutil.copy2(os.path.join(VERSIONS_DIR, target), MODEL_PATH)
+            self._load_model()
+            print(f">>> ⏪ [ML] 롤백 완료: {target} (정확도 {self.train_score:.1f}%)")
+            return {"status": "success", "message": f"롤백 완료: {target}",
+                    "score": self.train_score, "train_date": self.train_date}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -320,6 +397,12 @@ class MLPredictor:
 
             train_acc = model.score(X_train, y_train) * 100
             test_acc = model.score(X_test, y_test) * 100
+
+            # 🔥 [P1] 정확도 급락 감지 (이전 대비 10%p↓ 또는 50% 미만이면 경고)
+            prev_score = self.train_score
+            if prev_score and (test_acc < prev_score - 10 or test_acc < 50):
+                print(f">>> ⚠️ [ML] 정확도 급락 경고! 이전 {prev_score:.1f}% → 신규 {test_acc:.1f}% "
+                      f"(이상 시 rollback API로 직전 버전 복구 가능)")
 
             self.model = model
             self.is_trained = True
