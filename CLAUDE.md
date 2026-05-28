@@ -106,7 +106,7 @@ ssh -i "F:\Downloads\coinmate.pem" ec2-user@15.134.82.85 "cd ~/CoinMate-Backend 
 app/
 ├── main.py                    # FastAPI 앱, 스케줄러 시작
 ├── api/
-│   ├── market_api.py          # /market/prices, /market/analysis/{ticker}, /market/ml/status, /market/ml/accuracy
+│   ├── market_api.py          # /market/prices, /analysis/{ticker}, /ml/status, /ml/accuracy, /ml/versions, /ml/rollback, /client-error
 │   └── trade_api.py           # /trade/manual/buy, /trade/manual/sell, /trade/history, /trade/stats
 ├── core/
 │   ├── config.py              # 환경변수 로드
@@ -538,14 +538,43 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 - **활용**: 향후 "레짐=bear에서 산 거래 승률", "ml_prob 높을수록 승률 상관관계" 등 분석 → 레짐 필터/ML 임계값 튜닝 근거
 - 검증: EC2 마이그레이션 완료(4컬럼 확인), INSERT 컬럼/값 일치 확인
 
-#### P1 남은 항목 (미진행)
-- 전략별 성과 추적 (strategy_name 기반 집계) — 다음 후보
-- ML 모델 버전 관리 (날짜별 .pkl 보관 + 롤백)
-- 프론트 에러 로깅 (Sentry) — 외부 계정/DSN 필요
+#### P1 남은 항목 (미진행) → 세션 9에서 전부 완료
 
 ---
 
-## 당장 해야 하는 개선점 (P1 — P0는 세션7에서 완료)
+### 세션 9 (5/28): P1 잔여 작업 완료 (전략성과/ML버전/에러로깅)
+
+#### 1. 전략별 성과 추적 ✅
+- `trade_repository.get_strategy_stats()`: 거래를 3가지로 집계
+  - **개별 성분별**: trend/adx/macd/volume/vwap/bollinger/rsi/mfi 각각이 포함된 거래의 승률/평균/손익
+  - **전략 조합별**: strategy_name 전체 문자열 단위
+  - **레짐별**: buy_regime(bull/neutral/bear/미기록) 단위 — 레짐 필터 효과 추적
+- `GET /trade/strategy-stats` (읽기, 무인증)
+- **프론트**: `StrategyStats` 컴포넌트 + 거래성과 섹션에 "전략별 성과" 토글 버튼
+- **첫 분석 결과** (60여건): volume 성분 승률 25.9%/-2,910원(최악), trend+adx+vwap+macd 조합 50%/+386원(최선) → volume 추가 축소/제거 검토 근거
+
+#### 2. ML 모델 버전 관리 + 롤백 ✅
+- `_save_model`: 저장 시 `models/versions/xgb_model_YYYYMMDD_HHMMSS.pkl`로 복사 보관, `model_history.json`에 메타(날짜/정확도/피처수) 기록, 최근 10개만 유지(prune)
+- `train()`: 정확도 급락 감지(이전 대비 -10%p 또는 50% 미만 시 경고 로그)
+- `list_versions()` / `rollback(filename=None)` (미지정 시 직전 버전)
+- `GET /market/ml/versions`(읽기), `POST /market/ml/rollback`(쓰기 인증)
+- 베이스라인 버전 1개 시드 완료 (61.76%, 38피처)
+
+#### 3. 프론트 에러 로깅 (Sentry 대신 자체 구현) ✅
+- Sentry는 외부 계정 필요 → 자체 구현: `ErrorBoundary.componentDidCatch`가 에러를 백엔드로 fire-and-forget POST
+- `POST /market/client-error` (쓰기 인증) → `notifier.notify_error` → Discord 전달
+- message/url 길이 제한(truncate)
+- 검증: 키 없이 401, 키 있으면 200 + Discord 테스트 메시지 도착 확인
+
+#### 변경 파일
+- 백엔드: `trade_repository.py`, `trade_api.py`(strategy-stats), `ml_predictor.py`(버전관리), `market_api.py`(ml versions/rollback + client-error)
+- 프론트: `StrategyStats.tsx`(신규), `Dashboard.tsx`(토글), `marketApi.ts`, `ErrorBoundary.tsx`
+
+#### P1 상태: 전부 완료 ✅ (다음은 P2)
+
+---
+
+## 당장 해야 하는 개선점 (P2 — P0/P1은 세션7~9에서 완료)
 
 ### 🔴 P0: 서버 안정성 & 보안 — ✅ 전부 완료 (세션 7)
 | 항목 | 해결 |
@@ -556,13 +585,13 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 | ~~서버 다운 알림 없음~~ | ✅ systemd timer 헬스체크 → Discord |
 | ~~CORS 미설정~~ | ✅ ALLOWED_ORIGINS 제한 |
 
-### 🟡 P1: 데이터 품질 & 투명성
-| 항목 | 현황 | 개선 |
-|------|------|------|
-| 거래 시점 컨텍스트 미저장 | trades 테이블에 매수 당시 score, ml_prob 없음 | 컬럼 추가: `buy_score`, `buy_ml_prob`, `buy_reasons` |
-| ML 모델 버전 관리 없음 | xgb_model.pkl 1개만 덮어쓰기 | 날짜별 모델 보관 + 롤백 기능 |
-| 프론트 에러 로깅 없음 | console.error만 | Sentry 또는 에러 리포팅 연동 |
-| 전략별 성과 추적 없음 | 전체 승률만 표시 | 전략 조합별(trend+macd 등) 승률/수익률 집계 |
+### 🟡 P1: 데이터 품질 & 투명성 — ✅ 전부 완료 (세션 8~9)
+| 항목 | 해결 |
+|------|------|
+| ~~거래 시점 컨텍스트 미저장~~ | ✅ buy_score/buy_ml_prob/buy_regime/buy_rsi 저장 (세션8) |
+| ~~ML 모델 버전 관리 없음~~ | ✅ 날짜별 .pkl 보관 + 롤백 API + 급락 경고 (세션9) |
+| ~~프론트 에러 로깅 없음~~ | ✅ ErrorBoundary → /market/client-error → Discord (세션9) |
+| ~~전략별 성과 추적 없음~~ | ✅ 성분/조합/레짐별 집계 + 프론트 패널 (세션9) |
 
 ### 🟢 P2: 성능 & UX
 | 항목 | 현황 | 개선 |
