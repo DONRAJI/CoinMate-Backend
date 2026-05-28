@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import market_api, trade_api
 from app.services.collector import start_collector_thread
 from app.services.trade_manager import trade_manager
+from app.core.config import ALLOWED_ORIGINS
 
 # 전역 변수
 collector = None
@@ -43,8 +44,10 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    # 인증은 X-API-Key 헤더 기반(쿠키 미사용)이므로 credentials 불필요.
+    # 특정 origin 목록일 때만 credentials 허용 (와일드카드와 동시 사용 불가)
+    allow_credentials=(ALLOWED_ORIGINS != ["*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )

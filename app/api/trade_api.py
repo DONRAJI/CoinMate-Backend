@@ -1,16 +1,17 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.services.trade_manager import trade_manager
+from app.core.auth import verify_api_key
 from pydantic import BaseModel
 
 router = APIRouter()
 
-@router.post("/start")
+@router.post("/start", dependencies=[Depends(verify_api_key)])
 def start_trading():
     """실매매 시작"""
     trade_manager.start()
     return {"status": "started", "message": "Trading started"}
 
-@router.post("/stop")
+@router.post("/stop", dependencies=[Depends(verify_api_key)])
 def stop_trading():
     """실매매 중지"""
     trade_manager.stop()
@@ -30,11 +31,11 @@ class ManualTradeRequest(BaseModel):
     ticker: str
     amount: float = 0
 
-@router.post("/manual/buy")
+@router.post("/manual/buy", dependencies=[Depends(verify_api_key)])
 async def manual_buy(req: ManualTradeRequest):
     return await trade_manager.place_manual_buy(req.ticker, req.amount)
 
-@router.post("/manual/sell")
+@router.post("/manual/sell", dependencies=[Depends(verify_api_key)])
 async def manual_sell(req: ManualTradeRequest):
     return await trade_manager.place_manual_sell(req.ticker)
 
@@ -76,7 +77,7 @@ class ConfigUpdateRequest(BaseModel):
     rebuy_cooldown: int | None = None
     buy_threshold: float | None = None
 
-@router.post("/config")
+@router.post("/config", dependencies=[Depends(verify_api_key)])
 def update_config(req: ConfigUpdateRequest):
     """봇 설정값 실시간 변경 (재시작 불필요, 서버 재시작 시 초기화됨)"""
     changes = []

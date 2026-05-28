@@ -16,7 +16,8 @@ def fetch_and_save_all_coins(days=200):
     
     # DB 초기화 및 연결 (한 번만 연결)
     init_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout=5000")
     cursor = conn.cursor()
     
     try:

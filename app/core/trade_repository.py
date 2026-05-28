@@ -9,8 +9,10 @@ def now_kst():
 
 class TradeRepository:
     def get_conn(self):
-        conn = sqlite3.connect(DB_PATH)
+        # 🔥 [P0] timeout=5초: 다른 연결이 쓰기 중이면 lock 에러 대신 최대 5초 대기
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.row_factory = sqlite3.Row  # 🔥 [핵심] 컬럼명으로 접근 가능하게 변경
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def get_open_trades(self):
