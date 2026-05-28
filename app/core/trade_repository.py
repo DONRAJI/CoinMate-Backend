@@ -146,3 +146,61 @@ class TradeRepository:
                 "win_rate": round((row['wins'] or 0) / row['total'] * 100, 1),
                 "total_pnl": int(row['total_pnl'] or 0),
             }
+
+    # 🔥 [P1] 전략 조합별 / 개별 성분별 / 레짐별 성과 집계
+    def get_strategy_stats(self):
+        with self.get_conn() as conn:
+            rows = conn.execute("""
+                SELECT strategy_name, profit_rate, buy_amount, buy_regime
+                FROM trades WHERE status='closed' AND profit_rate IS NOT NULL
+            """).fetchall()
+
+        # 수수료 왕복(0.05% x2) 반영 손익(원)
+        def calc_pnl(amount, rate):
+            if not amount:
+                return 0.0
+            return amount * (1 - 0.0005) * (1 + rate / 100.0) * (1 - 0.0005) - amount
+
+        COMPONENTS = ['trend', 'adx', 'macd', 'volume', 'vwap', 'bollinger', 'rsi', 'mfi']
+        comp = {c: {'total': 0, 'wins': 0, 'pnl': 0.0, 'sum': 0.0} for c in COMPONENTS}
+        combo = {}
+        regime = {}
+
+        for r in rows:
+            name = r['strategy_name'] or 'Unknown'
+            rate = r['profit_rate'] or 0
+            amount = r['buy_amount'] or 0
+            reg = r['buy_regime'] or '미기록'
+            win = 1 if rate > 0 else 0
+            p = calc_pnl(amount, rate)
+
+            cs = combo.setdefault(name, {'total': 0, 'wins': 0, 'pnl': 0.0, 'sum': 0.0})
+            cs['total'] += 1; cs['wins'] += win; cs['pnl'] += p; cs['sum'] += rate
+
+            for c in COMPONENTS:
+                if c in name:
+                    d = comp[c]
+                    d['total'] += 1; d['wins'] += win; d['pnl'] += p; d['sum'] += rate
+
+            rs = regime.setdefault(reg, {'total': 0, 'wins': 0, 'pnl': 0.0, 'sum': 0.0})
+            rs['total'] += 1; rs['wins'] += win; rs['pnl'] += p; rs['sum'] += rate
+
+        def finalize(d):
+            out = []
+            for k, v in d.items():
+                if v['total'] == 0:
+                    continue
+                out.append({
+                    'name': k,
+                    'total': v['total'],
+                    'win_rate': round(v['wins'] / v['total'] * 100, 1),
+                    'avg_profit': round(v['sum'] / v['total'], 2),
+                    'total_pnl': int(v['pnl']),
+                })
+            return sorted(out, key=lambda x: x['total_pnl'], reverse=True)
+
+        return {
+            'by_component': finalize(comp),
+            'by_combo': finalize(combo),
+            'by_regime': finalize(regime),
+        }

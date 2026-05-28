@@ -49,6 +49,11 @@ def get_trade_stats():
     stats = trade_manager.repo.get_trade_stats()
     return {"status": "success", "data": stats}
 
+@router.get("/strategy-stats")
+def get_strategy_stats():
+    """전략 조합별/개별 성분별/레짐별 성과 집계"""
+    return {"status": "success", "data": trade_manager.repo.get_strategy_stats()}
+
 # === 설정 조회/변경 API ===
 @router.get("/config")
 def get_config():
