@@ -617,7 +617,42 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 
 ---
 
-## 당장 해야 하는 개선점 (P2 — P0/P1은 세션7~9에서 완료)
+### 세션 11 (6/1): P2 성능/UX 4종 완료
+
+#### 1. 설정 영속화 ✅
+- `cache/user_config.json`에 ControlPanel 변경값 자동 저장
+- `trade_manager._load_persisted_config()`: __init__ 마지막에 호출, 8개 설정 + buy_threshold 복원
+- `trade_manager.save_persisted_config()`: POST /trade/config 호출 시 자동 저장
+- 검증: profit_target 3.5→3.7 변경 → 재시작 → 3.7 유지 확인
+
+#### 2. ML 실시간 분석 보강 ✅
+- 기존: `cached_day_dfs`에 없는 비선정 코인은 모달에서 ml_reasons 미표시
+- 수정: analysis 엔드포인트에서 캐시 미스 시 pyupbit으로 day_df 즉시 조회 → ML 근거 계산
+- 폴백: 조회 실패 시 일일 스캔의 ml_prob만 사용
+- 검증: KRW-DOGE(비선정) 분석 시 ml_prob 29.3% + SHAP 근거 8개 정상
+
+#### 3. 대시보드 모바일 반응형 ✅
+- 3단계 미디어쿼리: 992px(태블릿), 768px(모바일), 480px(소형)
+- 자산패널 wrap, divider 숨김, 폰트 축소
+- 카드/통계/섹션 타이틀 크기 조정
+- index.html title "frontend" → "CoinMate Pro" + theme-color 메타
+
+#### 4. WebSocket 실시간 ✅
+- 백엔드 `app/api/ws_api.py` 신규: `/ws/prices` + ConnectionManager + broadcast_loop(2초)
+- main.py lifespan에서 broadcast_loop 백그라운드 태스크 시작
+- 프론트 Dashboard.tsx: WS 우선 연결 + 실패/끊김 시 5초 폴링 폴백, 자동 재연결
+- 폴링/WS 공용 파서 `applyPriceData()` 추출
+- 검증: WS 연결 즉시 type=prices 메시지 + summary 키 정상 수신
+- CORS 영향 없음 (Caddy reverse_proxy WS Upgrade 자동 지원)
+
+#### 변경 파일
+- 백엔드: `main.py`, `trade_manager.py`(영속화), `trade_api.py`(영속화 호출+안내문구), `market_api.py`(ML 보강), `ws_api.py`(신규)
+- 프론트: `Dashboard.tsx`(WS+파서 분리), `Dashboard.module.css`(반응형), `ControlPanel.tsx`(영속화 안내), `index.html`(타이틀)
+- EC2 파일: `cache/user_config.json`(런타임 생성)
+
+---
+
+## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
 
 ### 🔴 P0: 서버 안정성 & 보안 — ✅ 전부 완료 (세션 7)
 | 항목 | 해결 |
@@ -636,13 +671,13 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 | ~~프론트 에러 로깅 없음~~ | ✅ ErrorBoundary → /market/client-error → Discord (세션9) |
 | ~~전략별 성과 추적 없음~~ | ✅ 성분/조합/레짐별 집계 + 프론트 패널 (세션9) |
 
-### 🟢 P2: 성능 & UX
-| 항목 | 현황 | 개선 |
-|------|------|------|
-| 프론트 5초 폴링 | setInterval 5000ms | WebSocket 실시간 업데이트로 전환 |
-| ML 예측이 선정 종목에만 실행 | 나머지는 일일 스캔 결과만 | 실시간 분석 시 ML 근거도 함께 계산 (현재 analysis API에서만) |
-| 대시보드 모바일 미최적화 | PC 기준 UI | 반응형 CSS 개선 |
-| 설정 영속화 안됨 | 서버 재시작 시 기본값 복원 | .env 또는 DB에 저장 |
+### 🟢 P2: 성능 & UX — ✅ 전부 완료 (세션 11)
+| 항목 | 해결 |
+|------|------|
+| ~~프론트 5초 폴링~~ | ✅ WS 우선 + 폴링 폴백 (`/ws/prices`, broadcast 2초) |
+| ~~ML 예측이 선정 종목에만 실행~~ | ✅ analysis 엔드포인트가 비선정 코인도 즉시 day_df 조회→ML 근거 계산 |
+| ~~대시보드 모바일 미최적화~~ | ✅ 3단계 미디어쿼리(992/768/480) + 자산패널 wrap + 카드 크기 조정 |
+| ~~설정 영속화 안됨~~ | ✅ `cache/user_config.json` 자동 저장/복원 |
 
 ---
 
