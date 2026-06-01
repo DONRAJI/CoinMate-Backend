@@ -156,6 +156,33 @@ class TradeRepository:
                 "total_pnl": int(row['total_pnl'] or 0),
             }
 
+    # 🔥 [Kelly] 최근 N건 통계 (win rate, avg_win, avg_loss) — Kelly 자금관리용
+    def get_kelly_stats(self, limit: int = 50):
+        """최근 N건 closed 거래로 Kelly Criterion 계산 통계 반환.
+        None: 표본 < 10건이면 사용 안 함.
+        """
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT profit_rate FROM trades
+                WHERE status='closed' AND profit_rate IS NOT NULL
+                ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        if len(rows) < 10:
+            return None
+        wins = [r[0] for r in rows if r[0] > 0]
+        losses = [r[0] for r in rows if r[0] <= 0]
+        if not wins or not losses:
+            return None
+        return {
+            "count": len(rows),
+            "win_rate": round(len(wins) / len(rows), 3),
+            "avg_win": round(sum(wins) / len(wins), 2),
+            "avg_loss": round(sum(losses) / len(losses), 2),
+        }
+
     # 🔥 [P1] 전략 조합별 / 개별 성분별 / 레짐별 성과 집계
     def get_strategy_stats(self):
         with self.get_conn() as conn:

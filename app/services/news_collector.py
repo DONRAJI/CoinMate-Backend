@@ -52,6 +52,30 @@ _UPBIT_TICKER_REGEX = None
 # [Phase 1D] 한글 코인명 → 심볼 매핑 (lazy init, 업비트 API에서 로드)
 _KOREAN_NAME_DICT: dict[str, str] | None = None
 
+# 🔥 일반 영단어와 충돌 빈도가 높은 ticker — 텍스트 매칭 후 제외 (false positive ↓)
+# 실제 코인이지만 본문에 일반 단어로 잡혀 노이즈가 큰 케이스
+# 봇 매매에는 영향 없음 (별도 score/ML 기반). 카드 뱃지/뉴스 표시만 정확해짐.
+TICKER_BLACKLIST = {
+    "ORDER",   # 일반 'order' 단어와 충돌
+    "GAS",     # 'gas prices' 등
+    "GAME",    # 'game' 일반어
+    "PAY",     # 'pay' 일반어
+    "WIN",     # 'win' 일반어
+    "NOW",     # 'now' 일반어
+    "PRO",     # 'pro' 일반어
+    "TOP",     # 'top' 일반어
+    "UP",      # 'up' 일반어 (UP2도 잡힘)
+    "UP2",
+    "NEW",     # 'new' 일반어
+    "ALL",     # 'all' 일반어
+    "BIG",     # 'big' 일반어
+    "GOOD",    # 'good' 일반어
+    "CASH",    # 'cash' 일반어
+    "NEXT",    # 'next' 일반어
+    "PLAY",    # 'play' 일반어
+    "LOVE",    # 'love' 일반어
+}
+
 
 def _get_upbit_ticker_regex() -> re.Pattern:
     """업비트 KRW 마켓 심볼 정규식 (3-8자만 — 1-2자 심볼은 일반 영단어와 충돌)"""
@@ -123,7 +147,9 @@ def _extract_tickers(text: str) -> list[str]:
     matches = regex.findall(text.upper())
     result.extend(matches)
 
-    return list(dict.fromkeys(result))[:6]
+    # dedup + 블랙리스트 필터 (일반 영단어 충돌 제거) + 최대 6개
+    deduped = [t for t in dict.fromkeys(result) if t not in TICKER_BLACKLIST]
+    return deduped[:6]
 
 
 def _parse_pubdate(s: str) -> str | None:

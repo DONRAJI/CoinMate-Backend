@@ -483,6 +483,43 @@ class TradeManager:
                     else:
                         self.coin_loss_streak[ticker] = 0  # 승리 시 연패 초기화
 
+    # ═══════════════ Kelly Criterion 자금관리 ═══════════════
+    def _compute_kelly_fraction(self, pick: dict, stats: dict | None) -> float:
+        """[Kelly] per-pick Kelly fraction (1/4 Kelly 안전계수).
+        - p (승률): ML prob 우선, 없으면 history 승률
+        - b (win/loss 비율): history avg_win / avg_loss
+        - f = p - (1-p)/b → 1/4 Kelly 적용 → 5%~40% 범위로 clip
+        - 표본 부족(<10)이면 보수적 fallback 20%
+        """
+        KELLY_SAFETY = 0.25   # 1/4 Kelly (분산↓)
+        KELLY_MIN = 0.05      # 최소 5% (음수 edge일 때 탐색용 최소)
+        KELLY_MAX = 0.40      # 최대 40% (단일 종목 과집중 방지)
+        FALLBACK = 0.20
+
+        if not stats or not stats.get("avg_loss"):
+            return FALLBACK
+        avg_loss = abs(stats["avg_loss"])
+        avg_win = stats["avg_win"]
+        if avg_loss == 0 or avg_win <= 0:
+            return FALLBACK
+        b = avg_win / avg_loss
+
+        # 승률은 ML prob 우선 (per-pick 추정 더 정확)
+        ml_prob = pick.get("ml_prob")
+        if ml_prob is not None:
+            p = float(ml_prob)
+        else:
+            p = stats["win_rate"]
+
+        f = p - (1 - p) / b
+
+        if f <= 0:
+            # 이론상 거래 안 해야 하지만 매수 신호가 통과한 후보 → 최소 사이즈로 탐색
+            return KELLY_MIN
+
+        f *= KELLY_SAFETY
+        return max(KELLY_MIN, min(f, KELLY_MAX))
+
     async def process_buying(self):
         # ═══ [개선 1] 심야 매수 차단 ═══
         now_hour = datetime.now(KST).hour
@@ -677,18 +714,27 @@ class TradeManager:
             final_picks = candidates[:empty_slots]
 
             total_score = sum(p['score'] for p in final_picks)
-            max_per_coin = available_krw * MAX_SINGLE_RATIO
+            # 🔥 [Kelly] 자금관리 — 고정 MAX_SINGLE_RATIO 대신 per-pick Kelly fraction
+            kelly_stats = self.repo.get_kelly_stats(limit=50)
+            if kelly_stats:
+                print(f"  💼 [Kelly] 통계 N={kelly_stats['count']}, 승률={kelly_stats['win_rate']:.0%}, "
+                      f"평균승={kelly_stats['avg_win']}%, 평균손={kelly_stats['avg_loss']}%")
 
             for pick in final_picks:
                 ticker = pick.get('ticker')
                 price = pick.get('current_price')
                 if not ticker: continue
 
+                # per-pick Kelly fraction (ML prob 우선, history는 b 계산용)
+                k_frac = self._compute_kelly_fraction(pick, kelly_stats)
+                pick_max = available_krw * k_frac
+
                 if len(final_picks) == 1:
-                    budget = min(available_krw, max_per_coin)
+                    budget = pick_max
                 else:
                     weight = pick['score'] / total_score if total_score > 0 else 1.0 / len(final_picks)
-                    budget = min(available_krw * weight, max_per_coin)
+                    # score 가중치와 Kelly 상한 중 작은 쪽
+                    budget = min(available_krw * weight, pick_max)
 
                 if budget < self.MIN_ORDER_KRW:
                     print(f"  💸 [Skip] {ticker}: 예산부족({budget:.0f}원 < {self.MIN_ORDER_KRW}원)")
@@ -698,7 +744,7 @@ class TradeManager:
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
 
                 ml_p = pick.get('ml_prob') or 0.5
-                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / 예산:{budget:.0f}원) -> 매수")
+                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / Kelly:{k_frac:.1%} / 예산:{budget:.0f}원) -> 매수")
 
                 # 🔥 [P1] 매수 시점 컨텍스트 (사후 분석용)
                 buy_context = {
