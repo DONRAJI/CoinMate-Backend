@@ -55,6 +55,26 @@ def init_db():
         UNIQUE(ticker, time)
     )
     ''')
+
+    # 🔥 [Phase 1A] 뉴스 테이블 (센티멘트 분석용)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS news (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        external_id TEXT UNIQUE,
+        url TEXT,
+        title TEXT,
+        description TEXT,
+        source TEXT,
+        published_at TIMESTAMP,
+        tickers TEXT,
+        sentiment REAL,
+        is_critical INTEGER DEFAULT 0,
+        raw_tags TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_critical ON news(is_critical, published_at DESC)')
     
     conn.commit()
     conn.close()

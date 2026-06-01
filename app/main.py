@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import market_api, trade_api, ws_api
+from app.api import market_api, trade_api, ws_api, news_api
 from app.services.collector import start_collector_thread
 from app.services.trade_manager import trade_manager
+from app.services.news_collector import news_collector
 from app.core.config import ALLOWED_ORIGINS
 
 # 전역 변수
@@ -37,11 +38,16 @@ async def lifespan(app: FastAPI):
     ws_task = asyncio.create_task(ws_api.broadcast_loop())
     print(">>> 📡 [System] WebSocket broadcast 루프 시작됨")
 
+    # 5. [Phase 1A] 뉴스 수집 루프
+    news_task = asyncio.create_task(news_collector.loop())
+    print(">>> 🗞️ [System] News collector 루프 시작됨 (15분 주기)")
+
     yield
 
     print("\n>>> 🔴 [System] 서버 종료 절차 시작...")
     if loop_task: loop_task.cancel()
     if ws_task: ws_task.cancel()
+    if news_task: news_task.cancel()
     if collector: collector.stop()
     print(">>> 👋 [System] Bye Bye!")
 
@@ -60,6 +66,7 @@ app.add_middleware(
 app.include_router(market_api.router, prefix="/market", tags=["Market Data"])
 app.include_router(trade_api.router, prefix="/trade", tags=["Trading Control"])
 app.include_router(ws_api.router, tags=["WebSocket"])  # /ws/prices
+app.include_router(news_api.router, prefix="/news", tags=["News"])
 
 @app.get("/")
 def read_root():
