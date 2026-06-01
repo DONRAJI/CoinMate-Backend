@@ -53,7 +53,10 @@ ssh -i "F:\Downloads\coinmate.pem" ec2-user@15.134.82.85 "cd ~/CoinMate-Backend 
 | TRAILING_ACTIVATION | 1.5% | 트레일링 스탑 활성화 |
 | TRAILING_DISTANCE | 1.2% | 트레일링 스탑 폭 |
 | REBUY_COOLDOWN | 1800초 (30분) | 매도 후 재매수 쿨타임 |
-| ML_MIN_PROB | 0.55 | ML 최소 확률 |
+| ML_MIN_PROB | 0.55 | ML 최소 확률 (bull) |
+| NEUTRAL_SCORE_FLOOR | 6.5 | neutral 시 score 최소 (세션10) |
+| NEUTRAL_ML_FLOOR | 0.60 | neutral 시 ML 최소 (세션10) |
+| ATR 손절 배수(추세/횡보) | 1.5 / 1.2 | 세션10에서 확대 |
 | NIGHT_BUY_BLOCK | 22~07시 | 심야 매수 차단 |
 | CONSECUTIVE_LOSS_LIMIT | 3연패 | 연속 손절 시 1시간 쿨오프 |
 | MIN_HOLD_MINUTES | 30분 | 최소 보유 시간 (점수하락 매도 차단) |
@@ -571,6 +574,46 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 - 프론트: `StrategyStats.tsx`(신규), `Dashboard.tsx`(토글), `marketApi.ts`, `ErrorBoundary.tsx`
 
 #### P1 상태: 전부 완료 ✅ (다음은 P2)
+
+---
+
+### 세션 10 (6/1): 3일 운영 점검 & 약세장 대응 강화
+
+#### 운영 점검 결과 (5/28~6/1, 3일)
+- ✅ 모든 자동화 정상: 서비스 무재시작 3일, 일일 분석 매일 생성, ML 매일 학습(5버전 보관, 정확도 61.76~62.16%), ML 정확도 5일치 자동 평가, DB 백업/헬스체크 정상, 24h 에러 0건
+- ✅ 매수 컨텍스트 완전 기록 (score/ml_prob/regime/rsi)
+- ✅ 레짐 필터 bear 차단 입증 (3일간 bear 매수 0건)
+- ⚠️ 디스크 78% (journal 372MB 증가) → 한도 100MB로 영구 제한, 즉시 정리 → 75%
+- ⚠️ 거래 9건 승률 11%, 손익 -1,433원. 특히 neutral 4건 전패(-2.36%)
+- ⚠️ ML Top10 5일 평균 변동 -1.65% (약세장에서 신뢰도 하락)
+
+#### 적용한 개선 4가지
+1. **레짐 판정 강화**: bull 기준 `cur > MA24 × 1.003 AND mom6 > 0.5%`로 엄격화 (이전: `>0` → 작은 반등도 bull)
+2. **레짐별 매수 임계값 차등**:
+   - bull: score≥5.5 / ML≥55% (기본)
+   - neutral: score≥6.5 / ML≥60% (강제 상향)
+   - bear: 차단 (기존)
+   - 인스턴스 변수: `NEUTRAL_SCORE_BONUS`, `NEUTRAL_ML_BONUS`, `NEUTRAL_SCORE_FLOOR`, `NEUTRAL_ML_FLOOR`
+3. **손절선 ATR 비례 확대** (`process_selling`):
+   - 추세장: ATR 1.2배 → **1.5배**, profit 2.0배 → 2.5배
+   - 횡보장: ATR 1.0배 → **1.2배**, floor -1.5 → -1.8
+   - floor STOP_LOSS는 config 그대로(-2.0), 필요 시 ControlPanel에서 조정
+4. **디스크 모니터링** (`health_check.sh`):
+   - 디스크 85% 초과 시 Discord 1회 알림 (복구 시 자동 리셋)
+   - `/home/ec2-user/.disk_alert_state` 사용
+
+#### 인프라 추가 조치
+- **journald 한도** `/etc/systemd/journald.conf.d/size.conf`: SystemMaxUse=100M, KeepFree=200M, MaxRetentionSec=14day (영구 적용, journal 무한 증가 차단)
+
+#### 변경 파일
+- 백엔드: `trade_manager.py`(레짐+임계값+ATR), `scripts/health_check.sh`(디스크 알림)
+- 프론트: `Dashboard.tsx`(ML Top 약세장 경고 배지)
+- EC2: `/etc/systemd/journald.conf.d/size.conf`(신규), `~/health_check.sh` 갱신
+
+#### 다음 모니터링 포인트 (2~3일 후)
+- neutral 거래 빈도 감소 + 승률 향상 여부
+- ATR 손절 완화로 진입 직후 손절 비율 감소 여부
+- bull로 분류되는 빈도 (너무 적으면 기준 약간 완화 검토)
 
 ---
 
