@@ -11,10 +11,13 @@
 ## 인프라
 | 항목 | 값 |
 |------|-----|
-| 백엔드 | Python 3.11 + FastAPI, EC2 t3.micro (1GB RAM + 스왑 2GB) |
-| EC2 IP | 15.134.82.85 |
+| 백엔드 | Python 3.11 + FastAPI, EC2 **t3.small (2GB RAM + 스왑 2GB)** |
+| 리전 | **ap-northeast-2 (Seoul)** ← 세션12에서 Sydney→Seoul 이전 (업비트 latency 30배↓) |
+| EC2 IP | **43.201.190.36** (Elastic IP eipalloc-09f7038d52084e41b) |
+| Instance ID | i-0885a2e0c07dee1a7 |
+| 보안그룹 | sg-087f50b713f678080 (SSH 22 from 211.238.109.169/32, HTTP 80, HTTPS 443) |
 | EC2 사용자/경로 | `ec2-user`, `/home/ec2-user/CoinMate-Backend` |
-| PEM 키 | `F:\Downloads\coinmate.pem` |
+| PEM 키 | `F:\Downloads\coinmate.pem` (Sydney/Seoul 공통, 공개키 import) |
 | 프론트엔드 | React 19 + TypeScript + Vite, Vercel 자동배포 |
 | 프론트 URL | https://coin-mate-frontend.vercel.app |
 | 도메인(API) | coinmate1.duckdns.org (Caddy 리버스 프록시 → :8000) |
@@ -34,10 +37,14 @@
 
 ## 배포 명령어
 ```bash
-# 백엔드 EC2 배포
-ssh -i "F:\Downloads\coinmate.pem" ec2-user@15.134.82.85 "cd ~/CoinMate-Backend && git pull origin main && sudo systemctl restart coinmate"
+# 백엔드 EC2 배포 (Seoul)
+ssh -i "F:\Downloads\coinmate.pem" ec2-user@43.201.190.36 "cd ~/CoinMate-Backend && git pull origin main && sudo systemctl restart coinmate"
 
 # 프론트엔드: git push하면 Vercel 자동배포
+
+# DuckDNS A 레코드 업데이트 (도메인 IP 변경 시)
+curl "https://www.duckdns.org/update?domains=coinmate1&token={TOKEN}&ip={NEW_IP}&verbose=true"
+# 캐시 stale 시: clear=true 한 번 호출 후 다시 ip 설정 (SOA serial 강제 갱신)
 ```
 
 ---
@@ -334,7 +341,7 @@ src/
 #### 1. CI/CD (GitHub Actions)
 - `.github/workflows/ci.yml` 생성
 - push 시 자동: pytest → 테스트 통과 시 EC2 자동배포
-- **GitHub secrets 설정 필요**: `EC2_HOST` (15.134.82.85), `EC2_SSH_KEY` (PEM 키 내용)
+- **GitHub secrets 설정 필요**: `EC2_HOST` (43.201.190.36), `EC2_SSH_KEY` (PEM 키 내용), `EC2_REGION` (ap-northeast-2)
 
 #### 2. 단위 테스트 (23개)
 - `tests/test_pnl_calculation.py`: 손익 계산 5건, 진입 필터 7건, 매도 사유 4건
@@ -652,7 +659,61 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 
 ---
 
+### 세션 12 (6/1): Sydney → Seoul 리전 이전 + t3.small 업그레이드
+
+#### 동기
+- 업비트 서버는 한국 — Sydney에서 150ms vs Seoul 5ms → 슬리피지/체결 정확도 향상
+- t3.micro 1GB RAM 한계 → 풀스캔 시 OOM 위험 (스왑으로 완화하긴 했지만 헤드룸 부족)
+- 가격 비교: 두 옵션 거의 동가 (~$20/월)
+
+#### 변경 사항 비교
+| 항목 | 이전 (Sydney) | 이후 (Seoul) |
+|---|---|---|
+| 리전 | ap-southeast-2 | **ap-northeast-2** |
+| 인스턴스 | t3.micro (1GB) | **t3.small (2GB)** |
+| Public IP | 15.134.82.85 (EIP) | **43.201.190.36 (EIP)** |
+| 업비트 latency | ~150ms | **~5ms** |
+| 보안그룹 | sg-0d3354ad01650e0ae | sg-087f50b713f678080 |
+| Instance ID | i-01a4592c0cebb3c08 | i-0885a2e0c07dee1a7 |
+| 도메인 | coinmate1.duckdns.org (불변) | 동일 (DuckDNS A 레코드만 갱신) |
+
+#### 마이그레이션 절차 (실수 시 참고)
+1. 봇 정지 + DB 로컬 백업
+2. EC2 stop → create-image (AMI) → copy-image to Seoul (10-30분)
+3. Seoul에 import-key-pair(공개키만) + create-security-group + allocate-address(EIP)
+4. AMI에서 t3.small run-instances + associate-address(EIP)
+5. DuckDNS A 레코드 업데이트
+6. **업비트 API 키 IP 화이트리스트 새 IP 추가** (사용자 수동)
+7. 검증 후 Sydney terminate + AMI/snapshot 삭제 + EIP release
+
+#### 주의사항 (다음 마이그레이션 시)
+- **업비트 IP 화이트리스트** — API 키별로 허용 IP를 등록해야 함. IP 바뀌면 거래 차단 (`no_authorization_ip`)
+- **DuckDNS NS 캐시 stale 가능성** — 글로벌 resolver가 옛 IP를 끈질기게 캐시할 수 있음. `&clear=true` 한 번 호출 후 다시 IP 설정 = SOA serial 강제 갱신 = 즉시 전파
+- **EC2 키 페어는 리전별** — 공개키만 import하면 같은 PEM으로 양 리전 접속 가능 (`ssh-keygen -y -f` 로 추출 → `import-key-pair`)
+- WAL DB 파일은 AMI에 그대로 복제됨 (일관성 OK)
+- AMI는 1회용이라 마이그 후 즉시 deregister + snapshot 삭제 (월 $0.05/GB 절감)
+
+#### 마이그레이션 중 발견된 버그 (별도 개선 필요)
+- **좀비 청산 오작동**: `executor.get_all_balances()`가 API 인증 실패로 빈 리스트 반환 → 코드가 "지갑 비었음"으로 오해 → `close_zombie_trade` 호출 → DB의 open trade 사라짐
+- 이번 마이그 시 INJ가 이렇게 잘못 청산됐고, 백업 DB에서 trade #81 status='closed'→'open' SQL UPDATE로 복원함
+- **수정 필요**: `get_all_balances` 응답에 `error` 키가 있거나 비정상 응답일 때 좀비 처리 건너뛰는 안전장치 추가
+- 추가 보호: 매도 신호 1회만으로 close_zombie 하지 말고 N회 연속 검증 후에 실행
+
+#### 결과
+- 봇 30~60분 다운타임 (실제 ~50분)
+- 모든 상태 (DB 81건, ML 모델 + 버전, 설정, 캐시) 무손실 이전
+- INJ 잔고 1.004개 보존, 컨텍스트(buy_score 5.75, ml_prob 69.77%, regime neutral) 그대로
+- 메모리 1GB → 1.9GB (+ 스왑 2GB), CPU 1 → 2 vCPU
+- **이전 비용**: AMI 데이터전송 ~$0.16, 잠시 스냅샷 저장 — 합 $1 미만
+
+---
+
 ## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
+
+### 🟠 마이그레이션 후 발견된 작은 버그 (시간 날 때)
+- **좀비 청산 오작동**: get_all_balances API 실패를 빈 잔고로 오해 → 잘못 close_zombie
+- 위치: `app/services/trade_manager.py update_target_coins` (real_balances 처리)
+- 수정 아이디어: 응답이 list가 아니거나 error 키 있으면 sync 로직 건너뛰기 + 연속 N회 빈 응답일 때만 zombie 처리
 
 ### 🔴 P0: 서버 안정성 & 보안 — ✅ 전부 완료 (세션 7)
 | 항목 | 해결 |
@@ -716,22 +777,22 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 
 ## 세션 연속 작업 가이드
 
-### EC2 접속 전 항상 확인
+### EC2 접속 전 항상 확인 (Seoul 리전)
 ```bash
 # 1. 현재 IP 확인
 curl -s https://checkip.amazonaws.com
-# 2. 보안 그룹에 현재 IP 등록 (이전 IP 제거 후)
-aws ec2 revoke-security-group-ingress --group-id sg-0d3354ad01650e0ae --protocol tcp --port 22 --cidr {이전IP}/32
-aws ec2 authorize-security-group-ingress --group-id sg-0d3354ad01650e0ae --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges="[{CidrIp={현재IP}/32,Description=SSH}]"
+# 2. 보안 그룹에 현재 IP 등록 (이전 IP 제거 후) — Seoul SG
+aws ec2 revoke-security-group-ingress --region ap-northeast-2 --group-id sg-087f50b713f678080 --protocol tcp --port 22 --cidr {이전IP}/32
+aws ec2 authorize-security-group-ingress --region ap-northeast-2 --group-id sg-087f50b713f678080 --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges="[{CidrIp={현재IP}/32,Description=SSH}]"
 # 3. SSH 접속
-ssh -i "F:\Downloads\coinmate.pem" -o StrictHostKeyChecking=no ec2-user@15.134.82.85
+ssh -i "F:\Downloads\coinmate.pem" -o StrictHostKeyChecking=no ec2-user@43.201.190.36
 ```
 
 ### 배포 프로세스
 ```bash
 # 백엔드: 파일 SCP 후 재시작
-scp -i "F:\Downloads\coinmate.pem" -o StrictHostKeyChecking=no {로컬파일} ec2-user@15.134.82.85:/home/ec2-user/CoinMate-Backend/{경로}
-ssh -i "F:\Downloads\coinmate.pem" ec2-user@15.134.82.85 "sudo systemctl restart coinmate"
+scp -i "F:\Downloads\coinmate.pem" -o StrictHostKeyChecking=no {로컬파일} ec2-user@43.201.190.36:/home/ec2-user/CoinMate-Backend/{경로}
+ssh -i "F:\Downloads\coinmate.pem" ec2-user@43.201.190.36 "sudo systemctl restart coinmate"
 
 # 프론트엔드: git push → Vercel 자동배포
 cd F:\CoinMate\frontend && git add . && git commit -m "메시지" && git push origin main
