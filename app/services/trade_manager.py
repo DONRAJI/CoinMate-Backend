@@ -102,6 +102,69 @@ class TradeManager:
 
         # ═══ [개선 2-b] 재시작 시 연패 상태 복원 ═══
         self._restore_loss_state()
+        # ═══ [P2] 영속화된 설정 복원 (ControlPanel 변경값 유지) ═══
+        self._load_persisted_config()
+
+    # ═══════════════ 설정 영속화 ═══════════════
+    @property
+    def _config_path(self):
+        import os
+        base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        cache_dir = os.path.join(base, "cache")
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        return os.path.join(cache_dir, "user_config.json")
+
+    def _load_persisted_config(self):
+        """저장된 사용자 설정을 인스턴스에 반영 (재시작 후에도 ControlPanel 값 유지)"""
+        import os, json
+        path = self._config_path
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception as e:
+            print(f">>> ⚠️ [Config] 로드 실패: {e}")
+            return
+        ATTR_MAP = {
+            "stop_loss": "STOP_LOSS",
+            "profit_target": "PROFIT_TARGET",
+            "trailing_activation": "TRAILING_ACTIVATION",
+            "trailing_distance": "TRAILING_DISTANCE",
+            "max_coin_count": "MAX_COIN_COUNT",
+            "min_order_krw": "MIN_ORDER_KRW",
+            "rebuy_cooldown": "REBUY_COOLDOWN",
+        }
+        applied = []
+        for k, attr in ATTR_MAP.items():
+            if k in cfg:
+                setattr(self, attr, cfg[k])
+                applied.append(f"{k}={cfg[k]}")
+        if "buy_threshold" in cfg:
+            self.strategy.BUY_THRESHOLD = cfg["buy_threshold"]
+            applied.append(f"buy_threshold={cfg['buy_threshold']}")
+        if applied:
+            print(f">>> 🔧 [Config] 영속화된 설정 복원: {', '.join(applied)}")
+
+    def save_persisted_config(self):
+        """현재 인스턴스 설정값을 영속화 (POST /trade/config에서 호출)"""
+        import json
+        cfg = {
+            "stop_loss": self.STOP_LOSS,
+            "profit_target": self.PROFIT_TARGET,
+            "trailing_activation": self.TRAILING_ACTIVATION,
+            "trailing_distance": self.TRAILING_DISTANCE,
+            "max_coin_count": self.MAX_COIN_COUNT,
+            "min_order_krw": self.MIN_ORDER_KRW,
+            "rebuy_cooldown": self.REBUY_COOLDOWN,
+            "buy_threshold": self.strategy.BUY_THRESHOLD,
+        }
+        try:
+            with open(self._config_path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f">>> ⚠️ [Config] 저장 실패: {e}")
 
     def _restore_loss_state(self):
         """재시작 시 DB의 최근 거래 결과로 연패 카운터 복원 (인메모리 초기화 방지)"""

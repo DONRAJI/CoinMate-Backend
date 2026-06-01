@@ -84,7 +84,7 @@ class ConfigUpdateRequest(BaseModel):
 
 @router.post("/config", dependencies=[Depends(verify_api_key)])
 def update_config(req: ConfigUpdateRequest):
-    """봇 설정값 실시간 변경 (재시작 불필요, 서버 재시작 시 초기화됨)"""
+    """봇 설정값 실시간 변경 (재시작 후에도 user_config.json으로 유지됨)"""
     changes = []
     if req.stop_loss is not None:
         trade_manager.STOP_LOSS = req.stop_loss
@@ -111,4 +111,8 @@ def update_config(req: ConfigUpdateRequest):
         trade_manager.strategy.BUY_THRESHOLD = req.buy_threshold
         changes.append(f"buy_threshold={req.buy_threshold}")
 
-    return {"status": "success", "message": f"변경됨: {', '.join(changes)}"}
+    # 🔥 [P2] 변경 즉시 영속화 (재시작 후에도 유지)
+    if changes:
+        trade_manager.save_persisted_config()
+
+    return {"status": "success", "message": f"변경됨(영속): {', '.join(changes)}"}

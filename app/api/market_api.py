@@ -52,11 +52,28 @@ async def analyze_coin(ticker: str):
         elif trade_manager.shared_data and ticker in trade_manager.shared_data:
             response_data['current_price'] = trade_manager.shared_data[ticker]['current_price']
 
-        # ML 예측 + 근거 추가
-        if ticker in trade_manager.cached_day_dfs:
-            ml_result = trade_manager.ml.predict_with_reasons(trade_manager.cached_day_dfs[ticker])
-            response_data['ml_prob'] = ml_result['prob']
-            response_data['ml_reasons'] = ml_result['reasons']
+        # 🔥 [P2] ML 예측 + 근거 — 비선정 코인도 계산되도록 보강
+        if trade_manager.ml.is_trained:
+            df_for_ml = None
+            if ticker in trade_manager.cached_day_dfs:
+                df_for_ml = trade_manager.cached_day_dfs[ticker]
+            else:
+                # 캐시 없으면 즉시 가져와서 ML만 돌림(저장은 안 함, 메모리 절약)
+                try:
+                    import pyupbit, asyncio
+                    df_for_ml = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=60)
+                except Exception as e:
+                    print(f">>> ⚠️ [Analysis] {ticker} day_df 조회 실패: {e}")
+
+            if df_for_ml is not None and len(df_for_ml) >= 50:
+                ml_result = trade_manager.ml.predict_with_reasons(df_for_ml)
+                response_data['ml_prob'] = ml_result['prob']
+                response_data['ml_reasons'] = ml_result['reasons']
+            else:
+                # 폴백: 일일 스캔 결과의 ml_prob (근거는 없음)
+                if 'ml_prob' not in response_data and cached_data.get('ml_prob') is not None:
+                    response_data['ml_prob'] = cached_data['ml_prob']
+                response_data.setdefault('ml_reasons', [])
 
         # ML 모델 상태
         response_data['ml_status'] = trade_manager.ml.get_status()
