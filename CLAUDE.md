@@ -170,6 +170,8 @@ src/
 | buy_ml_prob | REAL | [P1] 매수 시점 ML 상승확률 (수동매수는 NULL) |
 | buy_regime | TEXT | [P1] 매수 시점 BTC 레짐 (bull/neutral/bear) |
 | buy_rsi | REAL | [P1] 매수 시점 RSI (수동매수는 NULL) |
+| buy_news_sentiment | REAL | [Phase 1B] 매수 시점 24h 평균 뉴스 sentiment |
+| buy_news_critical_count | INTEGER | [Phase 1B] 매수 시점 24h 내 치명적 뉴스 건수 |
 
 ---
 
@@ -767,6 +769,54 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 - **1C 실시간 알림**: 보유 코인 critical 발견 시 Discord 알림
 - **1D 한국어 RSS**: 코인데스크코리아/토큰포스트 RSS 추가, ticker 매칭에 한글 코인명 dict
 - **ticker 추출 정확도 개선**: 'ORDER' 같은 false positive 대응 (일반 영단어 블랙리스트, 또는 컨텍스트 기반)
+
+---
+
+### 세션 14 (6/1): Phase 1B — 뉴스 표시 + 매수 컨텍스트 기록 (매매에는 영향 없음)
+
+#### 의사결정 배경
+- 1A 수집기는 동작하지만 **신뢰성/정확도가 검증되지 않음**:
+  - 키워드 기반 sentiment (LLM 아님) — 일부 false positive/negative
+  - ticker 추출 정규식 — 'ORDER' 같은 false positive 존재
+  - 1사이클(114건)만 누적, 뉴스↔실제 가격 변동 상관관계 미검증
+- 사용자 의견: "지표/참고용으로 쓰고 직접 영향은 자제"
+- **레짐 필터 도입 패턴 재사용**: 먼저 컨텍스트 기록 → 데이터 누적 → 사후 분석 → 효과 확신 시 매매 통합 (Phase 1B-2 후속)
+
+#### A. 참고용 표시 (사용자가 봇 결정을 보완)
+- **카드 뱃지** (Dashboard): 24h 내 뉴스 있는 코인에 `📰 N` (sentiment 중립~긍정) / `🚨 N` (critical), 색상으로 sentiment 표현
+- **CoinModal 뉴스 섹션**: 클릭한 코인의 48h 뉴스 리스트 (sentiment + critical 표시)
+- **TradeHistory**: 매수근거 컬럼에 `📰/🚨` 추가
+- **MarketData 타입 확장**: `news: {count, sentiment, critical}` (선택적)
+
+#### B. 매수 시점 컨텍스트 기록 (분석 기반 데이터)
+- DB 마이그레이션 (idempotent ALTER ADD):
+  - `trades.buy_news_sentiment REAL`
+  - `trades.buy_news_critical_count INTEGER`
+- `trade_manager.process_buying` + `place_manual_buy`에서 매수 직전 `news_collector.get_ticker_summary(ticker, 24)` 호출 → buy_context에 포함
+- `log_buy`에 두 필드 저장
+
+#### 성능 최적화: news_collector.get_all_ticker_summaries()
+- 매 사이클마다 ticker별 SQL 호출 대신 **1회 쿼리로 전 ticker 집계**
+- 1분 캐시 (`SUMMARY_CACHE_TTL=60`) — 매수 루프 1초 주기에도 부하 미미
+- `update_frontend_cache`에서 호출 → 모든 카드 item에 news 메타 부착
+
+#### 검증 (배포 직후)
+- Migration: 두 컬럼 자동 추가 확인
+- `/market/prices` 응답: 11개 카드 중 4개에 뉴스 메타 (XRP -0.6, ETH 🚨critical, NEAR 0, BTC 3건 0) 정상
+
+#### 매매에는 영향 없음 (의도적)
+- veto/score 가산 등 **자동 매매 로직 미적용**
+- 다음 매수부터 컨텍스트가 DB에 쌓이며, 1~2주 후 데이터로 효과 분석 → Phase 1B-2(매매 통합 결정) 또는 1C(알림)로 진행
+
+#### 변경 파일
+- 백엔드: `database.py`(마이그레이션), `trade_repository.py`(log_buy 확장), `news_collector.py`(summary 캐시), `trade_manager.py`(buy_context+frontend_cache)
+- 프론트: `types/common.ts`, `Dashboard.tsx`(2종 카드 뱃지), `CoinModal.tsx`(뉴스 섹션), `TradeHistory.tsx`(뉴스 컬럼)
+
+#### Phase 1 잔여 (효과 확인 후 결정)
+- **1B-2 매매 통합**: 데이터 1~2주 누적 + win-rate 차이 입증 후 critical-only veto 또는 sentiment 가산 활성화
+- **1C 실시간 알림**: 보유 코인 critical 발견 시 Discord 알림 (구현 부담 작음, 가치 큼 — 다음 후보)
+- **1D 한국어 RSS**: 코인데스크코리아/토큰포스트 + 한글 코인명 dict
+- ticker 추출 정확도 (false positive 블랙리스트)
 
 ---
 
