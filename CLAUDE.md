@@ -117,6 +117,8 @@ app/
 ├── main.py                    # FastAPI 앱, 스케줄러 시작
 ├── api/
 │   ├── market_api.py          # /market/prices, /analysis/{ticker}, /ml/status, /ml/accuracy, /ml/versions, /ml/rollback, /client-error
+│   ├── news_api.py            # /news/recent, /news/ticker/{ticker}, /news/sentiment/{ticker}, /news/stats [Phase 1A]
+│   ├── ws_api.py              # /ws/prices (WebSocket)
 │   └── trade_api.py           # /trade/manual/buy, /trade/manual/sell, /trade/history, /trade/stats
 ├── core/
 │   ├── config.py              # 환경변수 로드
@@ -705,6 +707,66 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 - INJ 잔고 1.004개 보존, 컨텍스트(buy_score 5.75, ml_prob 69.77%, regime neutral) 그대로
 - 메모리 1GB → 1.9GB (+ 스왑 2GB), CPU 1 → 2 vCPU
 - **이전 비용**: AMI 데이터전송 ~$0.16, 잠시 스냅샷 저장 — 합 $1 미만
+
+---
+
+### 세션 13 (6/1): Phase 1A 뉴스 기반 분석 (수집 + 센티멘트 + 표시)
+
+#### 아키텍처
+```
+[15분마다]
+  news_collector.loop()
+    ├─ 4개 RSS 병렬 fetch (httpx, follow_redirects)
+    │   • CoinDesk / CoinTelegraph / Decrypt / The Block
+    ├─ ticker 추출: 본문 정규식 (업비트 KRW 마켓 심볼 3-8자, lazy cache)
+    ├─ score_text(): 키워드 기반 sentiment (-1.0~+1.0) + is_critical 플래그
+    │   • critical: hack/exploit/scam/delist/규제 등 (영/한)
+    │   • +/- 키워드: launch/partnership/rally vs crash/plunge/dump
+    └─ INSERT OR IGNORE INTO news (external_id UNIQUE = source:url)
+
+[일 1회]
+  cleanup_old() — 30일 이상 자동 삭제
+
+[REST API]
+  /news/recent?limit=N        → 최신 N건
+  /news/ticker/{TICKER}?hours → 코인별 N시간 내
+  /news/sentiment/{TICKER}    → 코인별 평균 센티멘트 + critical 카운트
+  /news/stats                 → 수집기 상태 (모니터링용)
+```
+
+#### 핵심 결정
+- **CryptoCompare/CoinGecko/CryptoPanic 모두 무료 API 차단됨** (2025+ 정책 변경) → RSS 기반으로 전환
+- **RSS는 ticker 메타데이터 없음** → 업비트 KRW 마켓 심볼 화이트리스트 정규식으로 본문 매칭 (3-8자만 — 1-2자는 일반 영단어와 충돌)
+- **CryptoPanic는 옵션** — `CRYPTOPANIC_API_KEY` env 있으면 자동 추가
+- **stdlib only**: xml.etree, email.utils, re — feedparser 등 추가 의존성 없음
+
+#### 첫 수집 결과
+- 4 RSS 소스에서 114건/사이클 (~250건/시간 가능)
+- critical 자동 감지 정확 (AAVE exploit, ICO hack 등)
+- ticker 추출 부분 작동 (XRP, SUI, AAVE, GAS 등 — false-positive 'ORDER' 같은 케이스 존재, 추후 튜닝)
+
+#### 프론트
+- `NewsFeed.tsx`: 필터(전체/긍정/부정/치명적), 최근 50건, 최대 520px 스크롤
+- Dashboard 새 섹션 "📰 시장 뉴스" + 토글 (ML Top과 거래성과 사이)
+- 센티멘트 이모지: 🚨(critical) 🟢(>0.5) ↗️(>0) ⚪(0) ↘️(<0) 🔴(≤-0.5)
+
+#### 신규 파일
+- `backend/app/services/news_sentiment.py` (키워드 사전 + score_text)
+- `backend/app/services/news_collector.py` (수집 루프)
+- `backend/app/api/news_api.py` (REST)
+- `frontend/src/components/NewsFeed/NewsFeed.tsx`
+
+#### 변경 파일
+- `backend/app/core/database.py` (news 테이블 + 인덱스)
+- `backend/app/main.py` (collector lifespan task + router)
+- `frontend/src/api/marketApi.ts` (getRecentNews/getTickerNews/getTickerSentiment)
+- `frontend/src/components/Dashboard/Dashboard.tsx` (뉴스 섹션 + 토글)
+
+#### Phase 1A 미진행 (다음 후보)
+- **1B 매매 통합**: process_buying에서 후보 코인의 4h 내 critical 뉴스가 있으면 매수 차단(veto), 평균 sentiment를 score에 가산
+- **1C 실시간 알림**: 보유 코인 critical 발견 시 Discord 알림
+- **1D 한국어 RSS**: 코인데스크코리아/토큰포스트 RSS 추가, ticker 매칭에 한글 코인명 dict
+- **ticker 추출 정확도 개선**: 'ORDER' 같은 false positive 대응 (일반 영단어 블랙리스트, 또는 컨텍스트 기반)
 
 ---
 
