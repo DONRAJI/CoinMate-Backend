@@ -62,7 +62,17 @@ class TradeManager:
         self._market_regime_ts = 0
         self.MARKET_REGIME_TTL = 1800     # 30분 캐시
         self._last_bear_log = 0
+        self._last_neutral_log = 0
         self._market_regime_detail = {}   # {btc_price, ma24_dev_pct, mom6, updated} — 프론트 표시용
+
+        # ═══ [개선 7] 레짐별 매수 임계값 — 약한 시장에서 엄격 진입 ═══
+        # 데이터(3일/9건) 분석: neutral 전패, bull도 승률 20% → 약한 레짐엔 더 엄격해야 함
+        # bull: 사용자 BUY_THRESHOLD/ML_MIN_PROB 그대로
+        # neutral: +1.0점 / +5%p (혹은 6.5/0.60 중 큰값)
+        self.NEUTRAL_SCORE_BONUS = 1.0
+        self.NEUTRAL_ML_BONUS = 0.05
+        self.NEUTRAL_SCORE_FLOOR = 6.5
+        self.NEUTRAL_ML_FLOOR = 0.60
 
         # ═══ [개선 4] 최소 보유 시간 ═══
         self.MIN_HOLD_MINUTES = 30        # 매수 후 30분간 점수하락 매도 차단
@@ -136,9 +146,10 @@ class TradeManager:
                 cur = closes.iloc[-1]
                 ma24 = closes.rolling(24).mean().iloc[-1]
                 mom6 = ((cur - closes.iloc[-7]) / closes.iloc[-7]) * 100 if closes.iloc[-7] > 0 else 0
+                # 강화된 레짐 판정: bull은 의미 있는 추세만 인정 (작은 반등은 neutral)
                 if cur < ma24 and mom6 < -1.0:
                     regime = "bear"
-                elif cur > ma24 and mom6 > 0:
+                elif cur > ma24 * 1.003 and mom6 > 0.5:  # MA24 0.3%+ 상회 AND 6h모멘텀 0.5%+
                     regime = "bull"
                 else:
                     regime = "neutral"
@@ -277,15 +288,20 @@ class TradeManager:
             atr = res.get('atr', 0)
             atr_pct = (atr / buy_price * 100) if buy_price > 0 and atr > 0 else 0
 
+            # 🔥 [개선 8] 손절선 ATR 비례 확대 — 진입 직후 -2% 도달 패턴 완화
+            # 데이터 분석: 손절 대부분이 -2%대에 몰림 → floor 묶임 + ATR 배수 부족
+            # → 배수 ↑(1.2→1.5, 1.0→1.2) + floor 완화(-2.0→-2.5, -1.5→-1.8)로 변동성 흡수
             if is_sideways:
-                # 횡보장: 기본 타이트 + ATR 보정
-                stop_loss = max(-1.5, -(atr_pct * 1.0)) if atr_pct > 0 else -1.5
+                # 횡보장: 기본 타이트 + ATR 보정 (배수 1.0→1.2, floor -1.5→-1.8)
+                stop_loss = max(-1.8, -(atr_pct * 1.2)) if atr_pct > 0 else -1.8
                 profit_target = max(2.0, atr_pct * 1.5) if atr_pct > 0 else 2.0
             else:
-                # 추세장/일반: ATR 기반 동적 또는 기본값
+                # 추세장/일반: ATR 기반 동적 (배수 1.2→1.5, profit 2.0→2.5)
+                # floor는 self.STOP_LOSS(.env/config로 조정 가능, 기본 -2.0)
+                # 더 완화하려면 ControlPanel에서 STOP_LOSS=-2.5로 조정 가능
                 if atr_pct > 0:
-                    stop_loss = max(self.STOP_LOSS, -(atr_pct * 1.2))   # ATR 1.2배, 기본값 이하로는 안 내림
-                    profit_target = max(self.PROFIT_TARGET, atr_pct * 2.0)  # ATR 2배
+                    stop_loss = max(self.STOP_LOSS, -(atr_pct * 1.5))   # ATR 1.5배
+                    profit_target = max(self.PROFIT_TARGET, atr_pct * 2.5)  # ATR 2.5배
                 else:
                     stop_loss = self.STOP_LOSS
                     profit_target = self.PROFIT_TARGET
@@ -425,6 +441,19 @@ class TradeManager:
                 self._last_bear_log = time.time()
             return
 
+        # ═══ [개선 7] 레짐별 매수 임계값 계산 (neutral은 더 엄격) ═══
+        base_score = self.strategy.BUY_THRESHOLD
+        base_ml = self.ML_MIN_PROB
+        if regime == "neutral":
+            local_buy_threshold = max(base_score + self.NEUTRAL_SCORE_BONUS, self.NEUTRAL_SCORE_FLOOR)
+            local_ml_min = max(base_ml + self.NEUTRAL_ML_BONUS, self.NEUTRAL_ML_FLOOR)
+            if time.time() - self._last_neutral_log > 600:
+                print(f"  ⚖️ [Market] BTC neutral → 엄격 진입 (score≥{local_buy_threshold}, ML≥{local_ml_min:.0%})")
+                self._last_neutral_log = time.time()
+        else:  # bull
+            local_buy_threshold = base_score
+            local_ml_min = base_ml
+
         # --- [1] 먼저 예산/슬롯 확인 ---
         active_cnt = self.repo.get_trade_count()
         empty_slots = self.MAX_COIN_COUNT - active_cnt
@@ -493,7 +522,7 @@ class TradeManager:
             mfi = res.get('mfi', 50)
             score = res['score']
 
-            if score < self.strategy.BUY_THRESHOLD:
+            if score < local_buy_threshold:
                 # 점수 미달은 skip_reason 불필요 (프론트에서 점수로 판단)
                 continue
 
@@ -541,13 +570,13 @@ class TradeManager:
                         self._set_skip_reason(ticker, f"📈 고점 근접 ({high_ratio:.1%})")
                         continue
 
-            # ML 예측 (v2: 낮은 확률이면 차단)
+            # ML 예측 (v2: 낮은 확률이면 차단, 레짐별 임계값 적용)
             ml_prob = res.get('ml_prob') or 0.5
             if self.ml.is_trained:
-                print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%}")
-                if ml_prob < self.ML_MIN_PROB:
-                    print(f"  🚫 [Skip] {ticker}: ML 확률 낮음 ({ml_prob:.1%} < {self.ML_MIN_PROB:.0%})")
-                    self._set_skip_reason(ticker, f"🤖 ML 확률 낮음 ({ml_prob:.0%})")
+                print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%} (기준 {local_ml_min:.0%}, 레짐 {regime})")
+                if ml_prob < local_ml_min:
+                    print(f"  🚫 [Skip] {ticker}: ML 확률 낮음 ({ml_prob:.1%} < {local_ml_min:.0%}) [레짐: {regime}]")
+                    self._set_skip_reason(ticker, f"🤖 ML 확률 낮음 ({ml_prob:.0%}) [{regime}]")
                     continue
 
             last_open = df_min['open'].iloc[-1]
