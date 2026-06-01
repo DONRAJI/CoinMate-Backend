@@ -104,6 +104,68 @@ class NewsCollector:
             "errors": 0,
             "sources": [],
         }
+        # [Phase 1B] ticker별 sentiment summary 캐시 (1분)
+        self._summary_cache: dict[str, dict] = {}
+        self._summary_cache_ts = 0
+        self.SUMMARY_CACHE_TTL = 60
+
+    def get_all_ticker_summaries(self, hours: int = 24) -> dict:
+        """모든 ticker의 N시간 sentiment 집계 (1회 SQL + 1분 캐시).
+        반환: {symbol: {count, avg_sentiment, critical_count}}
+        """
+        if time.time() - self._summary_cache_ts < self.SUMMARY_CACHE_TTL:
+            return self._summary_cache
+        try:
+            with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT tickers, sentiment, is_critical
+                    FROM news
+                    WHERE datetime(published_at) >= datetime('now', '-' || ? || ' hours')
+                      AND tickers IS NOT NULL AND tickers != ''
+                    """,
+                    (hours,),
+                ).fetchall()
+
+            agg: dict[str, dict] = {}
+            for tickers_str, sentiment, is_critical in rows:
+                if not tickers_str:
+                    continue
+                s = float(sentiment) if sentiment is not None else 0.0
+                crit = 1 if is_critical else 0
+                for t in tickers_str.split(","):
+                    t = t.strip().upper()
+                    if not t:
+                        continue
+                    if t not in agg:
+                        agg[t] = {"count": 0, "sum_sentiment": 0.0, "critical_count": 0}
+                    agg[t]["count"] += 1
+                    agg[t]["sum_sentiment"] += s
+                    agg[t]["critical_count"] += crit
+
+            result = {
+                t: {
+                    "count": d["count"],
+                    "avg_sentiment": round(d["sum_sentiment"] / d["count"], 2) if d["count"] else 0.0,
+                    "critical_count": d["critical_count"],
+                }
+                for t, d in agg.items()
+            }
+            self._summary_cache = result
+            self._summary_cache_ts = time.time()
+            return result
+        except Exception as e:
+            print(f"⚠️ [News summary] {e}")
+            return self._summary_cache  # stale fallback
+
+    def get_ticker_summary(self, ticker: str, hours: int = 24) -> dict:
+        """단일 ticker (KRW-BTC 또는 BTC)의 sentiment summary"""
+        symbol = (ticker or "").upper().replace("KRW-", "").strip()
+        if not symbol:
+            return {"count": 0, "avg_sentiment": None, "critical_count": 0}
+        return self.get_all_ticker_summaries(hours).get(
+            symbol, {"count": 0, "avg_sentiment": None, "critical_count": 0}
+        )
 
     # ─────────────────── RSS fetchers ───────────────────
     async def fetch_rss(self, source_name: str, url: str) -> list[dict]:

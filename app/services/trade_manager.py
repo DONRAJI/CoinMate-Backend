@@ -707,6 +707,14 @@ class TradeManager:
                     "regime": self._market_regime_cache or "neutral",
                     "rsi": round(float(pick.get('rsi', 0)), 1),
                 }
+                # [Phase 1B] 매수 시점 뉴스 컨텍스트 (참고/분석용, 매매에 직접 영향 없음)
+                try:
+                    from app.services.news_collector import news_collector as _nc
+                    news_sum = _nc.get_ticker_summary(ticker, hours=24)
+                    buy_context["news_sentiment"] = news_sum.get("avg_sentiment")
+                    buy_context["news_critical_count"] = news_sum.get("critical_count", 0)
+                except Exception as _e:
+                    pass
                 success = await self.executor.try_buy(ticker, price, budget, strategy_name, buy_context)
                 if success:
                     available_krw -= budget
@@ -730,6 +738,14 @@ class TradeManager:
             # 🔥 [P1] 수동 매수도 레짐 기록 (score/ml_prob은 없음)
             manual_ctx = {"score": None, "ml_prob": None,
                           "regime": self._market_regime_cache or "neutral", "rsi": None}
+            # [Phase 1B] 뉴스 컨텍스트도 기록
+            try:
+                from app.services.news_collector import news_collector as _nc
+                news_sum = _nc.get_ticker_summary(ticker, hours=24)
+                manual_ctx["news_sentiment"] = news_sum.get("avg_sentiment")
+                manual_ctx["news_critical_count"] = news_sum.get("critical_count", 0)
+            except Exception:
+                pass
             success = await self.executor.try_buy(ticker, current_price, krw_amount, "Manual(수동)", manual_ctx)
             
             if success:
@@ -1072,18 +1088,25 @@ class TradeManager:
         except Exception as e:
             print(f"⚠️ [Frontend Update Error] {e}")
 
+        # [Phase 1B] 모든 ticker의 24h 뉴스 sentiment summary 한 번에 로드 (1분 캐시)
+        try:
+            from app.services.news_collector import news_collector as _nc
+            news_summaries = _nc.get_all_ticker_summaries(hours=24)
+        except Exception:
+            news_summaries = {}
+
         items_list = []
         for ticker, data in self.market_status.items():
             item = data.copy()
             item['ticker'] = ticker
-            
+
             if not item.get('reasons') and item.get('strategies'):
                 active_reasons = [self.STRATEGY_MAP.get(k, k) for k, v in item['strategies'].items() if v == 1]
                 item['reasons'] = active_reasons
 
             if self.shared_data and ticker in self.shared_data:
                 item['price'] = self.shared_data[ticker].get('current_price', 0)
-            
+
             if ticker in holdings_map:
                 buy_price = holdings_map[ticker]
                 current_price = item['price']
@@ -1091,7 +1114,17 @@ class TradeManager:
                     profit_rate = ((current_price - buy_price) / buy_price) * 100
                     item['buy_price'] = buy_price
                     item['profit_rate'] = profit_rate
-            
+
+            # [Phase 1B] 뉴스 메타 (UI 뱃지용)
+            symbol = ticker.replace('KRW-', '').upper()
+            ns = news_summaries.get(symbol)
+            if ns and ns.get('count', 0) > 0:
+                item['news'] = {
+                    'count': ns['count'],
+                    'sentiment': ns['avg_sentiment'],
+                    'critical': ns['critical_count'],
+                }
+
             items_list.append(item)
 
         # ML Top 코인 (일일 스캔 기반, 프론트 전용)
@@ -1106,7 +1139,9 @@ class TradeManager:
                 realtime_price = 0
                 if self.shared_data and ticker in self.shared_data:
                     realtime_price = self.shared_data[ticker].get('current_price', 0)
-                ml_top_coins.append({
+                symbol = ticker.replace('KRW-', '').upper()
+                ns = news_summaries.get(symbol)
+                ml_item = {
                     "ticker": ticker,
                     "price": realtime_price or c.get('current_price', 0),
                     "score": c.get('score', 0),
@@ -1119,7 +1154,14 @@ class TradeManager:
                     "adx": c.get('adx', 0),
                     "ml_top_reasons": [],
                     "skip_reason": None,
-                })
+                }
+                if ns and ns.get('count', 0) > 0:
+                    ml_item['news'] = {
+                        'count': ns['count'],
+                        'sentiment': ns['avg_sentiment'],
+                        'critical': ns['critical_count'],
+                    }
+                ml_top_coins.append(ml_item)
         except Exception as e:
             print(f"⚠️ [ML Top Coins Error] {e}")
 

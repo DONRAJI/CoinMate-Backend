@@ -34,10 +34,15 @@ def init_db():
     )
     ''')
 
-    # 🔥 [P1] 마이그레이션: 기존 DB에 매수 시점 컨텍스트 컬럼 추가 (idempotent)
+    # 🔥 [P1/Phase 1B] 마이그레이션: 매수 시점 컨텍스트 컬럼 추가 (idempotent)
     existing_cols = {row[1] for row in cursor.execute("PRAGMA table_info(trades)").fetchall()}
-    for col, coltype in [("buy_score", "REAL"), ("buy_ml_prob", "REAL"),
-                          ("buy_regime", "TEXT"), ("buy_rsi", "REAL")]:
+    for col, coltype in [
+        ("buy_score", "REAL"), ("buy_ml_prob", "REAL"),
+        ("buy_regime", "TEXT"), ("buy_rsi", "REAL"),
+        # Phase 1B: 매수 시점 뉴스 컨텍스트 (참고/분석용, 매매에는 영향 없음)
+        ("buy_news_sentiment", "REAL"),
+        ("buy_news_critical_count", "INTEGER"),
+    ]:
         if col not in existing_cols:
             cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
             print(f">>> [Migration] trades.{col} 컬럼 추가")
