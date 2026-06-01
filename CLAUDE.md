@@ -64,6 +64,8 @@ curl "https://www.duckdns.org/update?domains=coinmate1&token={TOKEN}&ip={NEW_IP}
 | NEUTRAL_SCORE_FLOOR | 6.5 | neutral 시 score 최소 (세션10) |
 | NEUTRAL_ML_FLOOR | 0.60 | neutral 시 ML 최소 (세션10) |
 | ATR 손절 배수(추세/횡보) | 1.5 / 1.2 | 세션10에서 확대 |
+| 자금관리 | per-pick Kelly (1/4 안전계수) | 세션16, ML prob 기반 동적 사이즈 |
+| Kelly 범위 | 5%~40% | KELLY_MIN/KELLY_MAX |
 | NIGHT_BUY_BLOCK | 22~07시 | 심야 매수 차단 |
 | CONSECUTIVE_LOSS_LIMIT | 3연패 | 연속 손절 시 1시간 쿨오프 |
 | MIN_HOLD_MINUTES | 30분 | 최소 보유 시간 (점수하락 매도 차단) |
@@ -855,6 +857,45 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 #### Phase 1 남은 미진행
 - **1B-2 매매 통합** (데이터 누적 후): critical veto / sentiment 가산
 - **1C 실시간 알림**: 보유 코인 critical 즉시 Discord 알림 (다음 추천)
+
+---
+
+### 세션 16 (6/1): 자금관리 Kelly + ticker 블랙리스트 (안정화)
+
+#### 배경
+- 사용자 결정: Phase 2(선물거래) 진입 전 현 봇 안정화
+- 동기:
+  - 고정 `MAX_SINGLE_RATIO = 0.40` 은 승률 24%, b≈1.29인 현 상황엔 과다 노출
+  - 뉴스 ticker 추출에서 ORDER/GAME/PAY 같은 일반 영단어 false positive
+
+#### Kelly Criterion 자금관리
+- `trade_repository.get_kelly_stats(limit=50)`: 최근 50건 closed로 (count, win_rate, avg_win, avg_loss) 반환
+- `trade_manager._compute_kelly_fraction(pick, stats)`:
+  - `f = p - (1-p)/b`, `b = avg_win/avg_loss`
+  - **p (승률) = ML prob 우선 사용** (per-pick 추정 더 정확), fallback history win rate
+  - **1/4 Kelly 안전계수** + clip 5%~40%
+  - 음수 edge (f≤0) → KELLY_MIN(5%, 탐색용 최소)
+- `process_buying`: 고정 `MAX_SINGLE_RATIO` 대신 per-pick `pick_max = available_krw * k_frac`
+- 한 줄 로그: `💼 [Kelly] 통계 N=50, 승률=24%, 평균승=2.85%, 평균손=-2.21%`
+- 검증 (현재 통계):
+  | ML prob | 이전(고정 40%) | Kelly | 변화 |
+  |---|---|---|---|
+  | 55% | 40% | **5.0%** | -87% (KELLY_MIN clamp) |
+  | 60% | 40% | **7.2%** | -82% |
+  | 70% | 40% | **11.7%** | -71% |
+  | 80% | 40% | **16.1%** | -60% |
+- 효과: 약한 신호엔 최소 베팅, 강한 신호엔 자연스럽게 증가. 승률 올라가면 자동 확대.
+
+#### ticker 블랙리스트
+- `news_collector.TICKER_BLACKLIST`: ORDER, GAS, GAME, PAY, WIN, NOW, PRO, TOP, UP, UP2, NEW, ALL, BIG, GOOD, CASH, NEXT, PLAY, LOVE
+- `_extract_tickers`에서 dedup + 6개 trim 전에 블랙리스트 필터
+- **봇 매매에는 영향 0** (자체 score/ML 기반), 카드 뱃지/뉴스 표시만 정확해짐
+- 검증: "Coinbase launches new game features, BTC at all-time high" → `[BTC]` 만 추출
+
+#### 변경 파일
+- `trade_repository.py` (get_kelly_stats)
+- `trade_manager.py` (_compute_kelly_fraction + process_buying 적용)
+- `news_collector.py` (TICKER_BLACKLIST + 필터)
 
 ---
 
