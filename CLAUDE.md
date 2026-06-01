@@ -815,8 +815,46 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 #### Phase 1 잔여 (효과 확인 후 결정)
 - **1B-2 매매 통합**: 데이터 1~2주 누적 + win-rate 차이 입증 후 critical-only veto 또는 sentiment 가산 활성화
 - **1C 실시간 알림**: 보유 코인 critical 발견 시 Discord 알림 (구현 부담 작음, 가치 큼 — 다음 후보)
-- **1D 한국어 RSS**: 코인데스크코리아/토큰포스트 + 한글 코인명 dict
-- ticker 추출 정확도 (false positive 블랙리스트)
+- ~~**1D 한국어 RSS**~~ → 세션 15에서 완료
+
+### 세션 15 (6/1): Phase 1D — 한국어 뉴스 통합
+
+#### 추가된 RSS (영문 4 + 한국어 2 = 총 6개)
+| 소스 | URL | 비고 |
+|---|---|---|
+| 토큰포스트 | `https://www.tokenpost.kr/rss` | 50건/cycle |
+| 블록미디어 | `https://www.blockmedia.co.kr/feed` | 10건/cycle |
+
+테스트해보고 응답 안 되거나 RSS 폐쇄된 소스: 코인데스크코리아(404 HTML 응답), 디센터(404), 코인리더스(404), 코인니스KR(ConnectError) → 위 2개만 사용
+
+#### 한글 코인명 → ticker 매핑
+- 업비트 `/v1/market/all` API에서 자동 추출 (lazy load, 1회)
+- **3자 이상 한글명만 사용** (1-2자 한글명 "신/위" 또는 "가스/네오/트론"은 일반 단어와 충돌 위험)
+- 총 212개 매핑 (BTC/ETH/ADA/NEAR 등)
+
+#### `_extract_tickers()` 알고리즘
+```
+1. 한글 매칭 (긴 이름 우선 + 매칭 후 마스킹으로 substring overlap 방지)
+   예: "이더리움 클래식" → ETC (이후 텍스트에서 "이더리움" 마스킹되어 ETH 중복 매칭 방지)
+2. 영문 ticker 정규식 매칭 (대문자 변환 + \b 단어경계)
+3. dict.fromkeys로 dedup + 최대 6개
+```
+
+#### 검증 (배포 직후)
+- 한 사이클 174건 (영문 114 + 한국어 60)
+- 신규 60건, 치명적 3건
+- ticker 추출 예시:
+  - `"비트코인 73,031달러, 이더리움 1,985달러"` → `BTC, ETH, DOGE, SOL` (정확)
+  - `"카르다노 재단, 2026년 서밋 취소"` → `ADA` (정확)
+- 한글 매핑 로드 로그: `>>> 🗞️ [News] 한글 코인명 매핑 212개 로드`
+
+#### 알려진 노이즈
+- 토큰포스트는 코인 외 일반 경제 뉴스도 섞임 (삼성전자 등). ticker 추출 안 돼서 카드 뱃지엔 영향 없음
+- 일반 영단어 충돌 가능 (예: 'ORDER', 'UP2') — 영문 ticker 추출 부분의 한계, false positive 블랙리스트는 미세 튜닝 단계로 미뤘음
+
+#### Phase 1 남은 미진행
+- **1B-2 매매 통합** (데이터 누적 후): critical veto / sentiment 가산
+- **1C 실시간 알림**: 보유 코인 critical 즉시 Discord 알림 (다음 추천)
 
 ---
 
