@@ -37,14 +37,20 @@ NEWS_RETENTION_DAYS = 30
 CRYPTOPANIC_API_KEY = (os.getenv("CRYPTOPANIC_API_KEY", "") or "").strip()
 
 RSS_SOURCES = [
+    # 영문
     ("coindesk", "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"),
     ("cointelegraph", "https://cointelegraph.com/rss"),
     ("decrypt", "https://decrypt.co/feed"),
     ("theblock", "https://www.theblock.co/rss.xml"),
+    # 🔥 [Phase 1D] 한국어 — 한글 코인명 매핑으로 ticker 추출
+    ("tokenpost", "https://www.tokenpost.kr/rss"),
+    ("blockmedia", "https://www.blockmedia.co.kr/feed"),
 ]
 
 # 업비트 KRW 마켓 심볼 정규식 (lazy init)
 _UPBIT_TICKER_REGEX = None
+# [Phase 1D] 한글 코인명 → 심볼 매핑 (lazy init, 업비트 API에서 로드)
+_KOREAN_NAME_DICT: dict[str, str] | None = None
 
 
 def _get_upbit_ticker_regex() -> re.Pattern:
@@ -69,12 +75,55 @@ def _get_upbit_ticker_regex() -> re.Pattern:
     return _UPBIT_TICKER_REGEX
 
 
+def _get_korean_name_dict() -> dict[str, str]:
+    """[Phase 1D] 업비트 한글 코인명 → 심볼 매핑 (lazy + 3자 이상만, 일반어 충돌 회피)"""
+    global _KOREAN_NAME_DICT
+    if _KOREAN_NAME_DICT is not None:
+        return _KOREAN_NAME_DICT
+    try:
+        r = httpx.get("https://api.upbit.com/v1/market/all?isDetails=false", timeout=10)
+        markets = r.json()
+        d: dict[str, str] = {}
+        for m in markets:
+            mid = m.get("market", "")
+            if mid.startswith("KRW-"):
+                symbol = mid.replace("KRW-", "")
+                kname = (m.get("korean_name") or "").strip()
+                # 3자 미만은 일반 한국어 단어와 충돌 위험(가스/네오/트론 등) → 제외
+                if len(kname) >= 3:
+                    d[kname] = symbol
+        _KOREAN_NAME_DICT = d
+        print(f">>> 🗞️ [News] 한글 코인명 매핑 {len(d)}개 로드")
+    except Exception as e:
+        print(f"⚠️ [News] 한글 매핑 로드 실패: {e}")
+        _KOREAN_NAME_DICT = {}
+    return _KOREAN_NAME_DICT
+
+
 def _extract_tickers(text: str) -> list[str]:
+    """제목+본문에서 ticker 추출:
+    1) 한글 코인명 매칭 (긴 이름 우선, 매칭 후 마스킹으로 substring 중복 방지)
+    2) 영문 ticker (정규식, \b 단어경계)
+    """
     if not text:
         return []
+    result: list[str] = []
+
+    # 1) 한글 매칭 (overlap 방지: 긴 이름 매칭 후 해당 부분 마스킹)
+    kdict = _get_korean_name_dict()
+    if kdict:
+        masked = text
+        for name in sorted(kdict.keys(), key=len, reverse=True):
+            if name in masked:
+                result.append(kdict[name])
+                masked = masked.replace(name, " " * len(name))
+
+    # 2) 영문 ticker
     regex = _get_upbit_ticker_regex()
     matches = regex.findall(text.upper())
-    return list(dict.fromkeys(matches))[:6]
+    result.extend(matches)
+
+    return list(dict.fromkeys(result))[:6]
 
 
 def _parse_pubdate(s: str) -> str | None:
