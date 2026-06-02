@@ -899,6 +899,55 @@ self.MARKET_REGIME_TTL = 1800; self._last_bear_log = 0
 
 ---
 
+### 세션 17 (6/2): ML 평가 버그 수정 + 적응형 ML 임계값
+
+#### 발견된 문제
+- 사용자 지적: "처음이랑 다르게 지금 전체적으로 상승확률이 너무 높게 잡힌다"
+- 데이터로 확인:
+  | 날짜 | 평균 ml_prob | ≥55% 코인 | ≥60% 코인 |
+  |---|---|---|---|
+  | 5/29 | 0.438 | 20% (48) | 11% (26) |
+  | 6/02 | **0.517** | **33% (80)** | **16% (40)** |
+  → 5일 만에 평균 +8%p 우 시프트. 고정 임계값 0.55 → 통과율 자연 증가 (위험)
+- ML 정확도 평가가 5/31에서 멈춰있던 원인: `pyupbit.get_current_price(batch)`가 단일 상폐 ticker로 전체 'Code not found' 실패 → log entry 안 만들고 종료
+
+#### 수정 1: ML 평가 batch 실패 fallback (`backtester._evaluate_yesterday_predictions`)
+- **활성 KRW 마켓 사전 필터**: `pyupbit.get_tickers()` 결과와 intersect → 상폐 코인 사전 제외
+- **batch 100개씩 호출** + 실패 시 **개별 호출 fallback**: 한 ticker가 실패해도 나머지 살림
+- 효과: 6/1 평가 백필 성공 (수동 호출). 향후 자동 사이클에서도 안정
+
+#### 수정 2: 적응형 ML 임계값 (`trade_manager._get_adaptive_ml_min`)
+- 그 날 전 코인의 ml_prob 분포에서 **상위 (100 - percentile)%** 기준값 계산 (기본 percentile=85, 즉 상위 15%)
+- `process_buying`에서 regime-based base_min과 max() → 더 엄격한 쪽 적용
+- 예 (6/2 분포 기준):
+  - bull base 0.55 → adaptive **0.606** (자동 +5.6%p 상향)
+  - neutral base 0.60 → adaptive 0.606 (거의 동일)
+- 효과: 분포 시프트되어 모델이 전반적으로 후한 점수 줘도 자동으로 상위만 통과시킴 (약한 신호 매수 차단)
+
+#### 신규 인스턴스 변수
+```python
+self.ADAPTIVE_ML_PERCENTILE = 85       # 상위 15%
+self.ADAPTIVE_ML_MIN_SAMPLE = 30       # 표본 부족 시 비활성
+```
+
+#### 검증 (배포 후)
+- 6/1 백필 성공: 전체 56.8%, Top10 40%, Top10 평균변동 -3.11%
+- 6일 누적 Top10 평균변동 **-1.9%** (약세장 영향, 적응형 임계값으로 개선 기대)
+- 분포 percentile별 임계값 시뮬레이션:
+  | percentile | 임계값 | 통과 코인 |
+  |---|---|---|
+  | 70% | 0.555 | 74 |
+  | 80% | 0.581 | 49 |
+  | **85% (기본)** | **0.606** | **37** |
+  | 90% | 0.624 | 25 |
+  | 95% | 0.665 | 13 |
+
+#### 변경 파일
+- `app/services/backtester.py` (`_evaluate_yesterday_predictions` 견고화)
+- `app/services/trade_manager.py` (`_get_adaptive_ml_min` + `process_buying` 통합)
+
+---
+
 ## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
 
 ### 🟠 마이그레이션 후 발견된 작은 버그 (시간 날 때)
