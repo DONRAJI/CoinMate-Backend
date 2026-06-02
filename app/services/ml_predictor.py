@@ -46,6 +46,7 @@ class MLPredictor:
         if self.initialized:
             return
         self.model = None
+        self.calibrator = None  # [개선] Isotonic regression calibrator
         self.feature_names = []
         self.is_trained = False
         self.train_score = 0
@@ -54,16 +55,18 @@ class MLPredictor:
         self.initialized = True
 
     def _load_model(self):
-        """저장된 모델 로드"""
+        """저장된 모델 로드 (calibrator 후방호환: 옛 모델은 None)"""
         try:
             if os.path.exists(MODEL_PATH):
                 data = joblib.load(MODEL_PATH)
                 self.model = data['model']
                 self.feature_names = data['feature_names']
+                self.calibrator = data.get('calibrator')  # 옛 모델엔 없음
                 self.is_trained = True
                 self.train_score = data.get('score', 0)
                 self.train_date = data.get('train_date', '')
-                print(f">>> 🤖 [ML] 모델 로드 완료 (정확도: {self.train_score:.1f}%, 학습일: {self.train_date})")
+                cal_msg = " + calibrated" if self.calibrator is not None else " (uncalibrated)"
+                print(f">>> 🤖 [ML] 모델 로드 완료 (정확도: {self.train_score:.1f}%, 학습일: {self.train_date}{cal_msg})")
         except Exception as e:
             print(f">>> ⚠️ [ML] 모델 로드 실패: {e}")
 
@@ -72,6 +75,7 @@ class MLPredictor:
         try:
             payload = {
                 'model': self.model,
+                'calibrator': self.calibrator,  # [개선] Isotonic calibrator
                 'feature_names': self.feature_names,
                 'score': self.train_score,
                 'train_date': datetime.now(KST).strftime('%Y-%m-%d %H:%M'),
@@ -361,10 +365,16 @@ class MLPredictor:
 
             self.feature_names = list(X.columns)
 
-            # 시계열 분할 (마지막 20%를 테스트)
-            split_idx = int(len(X) * 0.8)
-            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-            y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+            # 🔥 [개선] 3-way 시계열 분할: 70% 학습 / 15% 보정 / 15% 테스트
+            # - 학습: XGBoost 적합
+            # - 보정: Isotonic regression으로 확률 calibration
+            # - 테스트: 보정 vs 미보정 비교 평가
+            total = len(X)
+            train_end = int(total * 0.70)
+            cal_end = int(total * 0.85)
+            X_train, X_cal, X_test = X.iloc[:train_end], X.iloc[train_end:cal_end], X.iloc[cal_end:]
+            y_train, y_cal, y_test = y.iloc[:train_end], y.iloc[train_end:cal_end], y.iloc[cal_end:]
+            print(f"    분할: 학습={len(X_train)} / 보정={len(X_cal)} / 테스트={len(X_test)}")
 
             # 클래스 불균형 처리
             neg_count = (y_train == 0).sum()
@@ -388,15 +398,32 @@ class MLPredictor:
                 verbosity=0,
             )
 
-            # Early stopping으로 과적합 방지
+            # Early stopping용 eval은 calibration set 사용 (test는 최종 평가용)
             model.fit(
                 X_train, y_train,
-                eval_set=[(X_test, y_test)],
+                eval_set=[(X_cal, y_cal)],
                 verbose=False,
             )
 
+            # 🔥 [개선] Isotonic Regression Calibrator
+            # XGBoost raw output → 실제 확률에 맞춰 보정 (모델 평균 73% → 실제 33% 같은 어긋남 해결)
+            from sklearn.isotonic import IsotonicRegression
+            raw_cal_probs = model.predict_proba(X_cal)[:, 1]
+            calibrator = IsotonicRegression(out_of_bounds='clip')
+            calibrator.fit(raw_cal_probs, y_cal)
+
+            # 평가: 보정 전후 비교
             train_acc = model.score(X_train, y_train) * 100
-            test_acc = model.score(X_test, y_test) * 100
+            raw_test_probs = model.predict_proba(X_test)[:, 1]
+            cal_test_probs = calibrator.transform(raw_test_probs)
+            uncal_acc = ((raw_test_probs >= 0.5) == y_test.values).mean() * 100
+            cal_acc = ((cal_test_probs >= 0.5) == y_test.values).mean() * 100
+
+            actual_pos_rate = y_test.mean() * 100
+            print(f"    테스트 평균확률 — 미보정: {raw_test_probs.mean()*100:.1f}% / 보정: {cal_test_probs.mean()*100:.1f}% (실제 양성률 {actual_pos_rate:.1f}%)")
+            print(f"    테스트 정확도   — 미보정: {uncal_acc:.1f}% / 보정: {cal_acc:.1f}%")
+
+            test_acc = cal_acc  # 보정된 정확도를 공식 점수로
 
             # 🔥 [P1] 정확도 급락 감지 (이전 대비 10%p↓ 또는 50% 미만이면 경고)
             prev_score = self.train_score
@@ -405,6 +432,7 @@ class MLPredictor:
                       f"(이상 시 rollback API로 직전 버전 복구 가능)")
 
             self.model = model
+            self.calibrator = calibrator
             self.is_trained = True
             self.train_score = test_acc
             self.train_date = datetime.now(KST).strftime('%Y-%m-%d %H:%M')
@@ -474,8 +502,11 @@ class MLPredictor:
             # 피처 순서 맞추기
             last_row = last_row.reindex(columns=self.feature_names, fill_value=0)
 
-            prob = self.model.predict_proba(last_row)[0][1]  # 상승 확률
-            return float(prob)
+            raw_prob = self.model.predict_proba(last_row)[0][1]  # 상승 확률 (raw)
+            # [개선] calibrator 있으면 보정된 확률 반환
+            if self.calibrator is not None:
+                return float(self.calibrator.transform([raw_prob])[0])
+            return float(raw_prob)
 
         except Exception as e:
             print(f"⚠️ [ML Predict Error] {e}")
@@ -502,7 +533,12 @@ class MLPredictor:
                 last_row = last_row.fillna(0)
             last_row = last_row.reindex(columns=self.feature_names, fill_value=0)
 
-            prob = float(self.model.predict_proba(last_row)[0][1])
+            raw_prob = float(self.model.predict_proba(last_row)[0][1])
+            # [개선] calibrator 있으면 보정된 확률, SHAP은 raw 모델 기반 그대로
+            if self.calibrator is not None:
+                prob = float(self.calibrator.transform([raw_prob])[0])
+            else:
+                prob = raw_prob
 
             # --- 개별 예측 SHAP 기여도 (pred_contribs) ---
             dmatrix = xgb.DMatrix(last_row, feature_names=self.feature_names)
