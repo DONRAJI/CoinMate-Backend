@@ -74,6 +74,12 @@ class TradeManager:
         self.NEUTRAL_SCORE_FLOOR = 6.5
         self.NEUTRAL_ML_FLOOR = 0.60
 
+        # ═══ [개선 9] 적응형 ML 임계값 (분포 시프트 자동 대응) ═══
+        # ML 확률 분포가 시간에 따라 우로 시프트(예: 평균 0.44→0.52)하면
+        # 고정 임계값 0.55가 점점 헐거워짐 → 그 날 상위 N%만 통과시키는 percentile 임계값과 max()
+        self.ADAPTIVE_ML_PERCENTILE = 85  # 상위 15% (≈ percentile 85)
+        self.ADAPTIVE_ML_MIN_SAMPLE = 30  # 표본 30개 미만이면 적응형 비활성
+
         # ═══ [개선 4] 최소 보유 시간 ═══
         self.MIN_HOLD_MINUTES = 30        # 매수 후 30분간 점수하락 매도 차단
 
@@ -483,6 +489,23 @@ class TradeManager:
                     else:
                         self.coin_loss_streak[ticker] = 0  # 승리 시 연패 초기화
 
+    # ═══════════════ 적응형 ML 임계값 (분포 기반) ═══════════════
+    def _get_adaptive_ml_min(self, base_min: float) -> float:
+        """그 날 전 코인의 ml_prob 분포에서 상위 (100 - PERCENTILE)% 기준값과
+        regime-based base_min 중 더 큰 값을 반환.
+        분포가 시간에 따라 우로 시프트해도 자동으로 상위만 통과시킴.
+        """
+        try:
+            cache = self.backtester.results_cache or {}
+            probs = [c.get("ml_prob") for c in cache.values() if c.get("ml_prob") is not None]
+            if len(probs) < self.ADAPTIVE_ML_MIN_SAMPLE:
+                return base_min
+            sorted_p = sorted(probs)
+            idx = min(int(len(sorted_p) * self.ADAPTIVE_ML_PERCENTILE / 100), len(sorted_p) - 1)
+            return max(base_min, sorted_p[idx])
+        except Exception:
+            return base_min
+
     # ═══════════════ Kelly Criterion 자금관리 ═══════════════
     def _compute_kelly_fraction(self, pick: dict, stats: dict | None) -> float:
         """[Kelly] per-pick Kelly fraction (1/4 Kelly 안전계수).
@@ -553,6 +576,12 @@ class TradeManager:
         else:  # bull
             local_buy_threshold = base_score
             local_ml_min = base_ml
+
+        # ═══ [개선 9] 적응형 ML 임계값 (분포 시프트 자동 대응) ═══
+        adaptive_ml_min = self._get_adaptive_ml_min(local_ml_min)
+        if adaptive_ml_min > local_ml_min:
+            print(f"  📊 [Adaptive ML] 분포 상위 {100 - self.ADAPTIVE_ML_PERCENTILE}% 기준 → ML≥{adaptive_ml_min:.0%} (regime base {local_ml_min:.0%})")
+            local_ml_min = adaptive_ml_min
 
         # --- [1] 먼저 예산/슬롯 확인 ---
         active_cnt = self.repo.get_trade_count()

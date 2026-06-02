@@ -127,13 +127,42 @@ class Backtester:
             if not ml_predictions:
                 return
 
-            # 현재 가격 조회
-            tickers = list(ml_predictions.keys())
-            current_prices = await asyncio.to_thread(pyupbit.get_current_price, tickers)
-            if current_prices is None:
+            # [버그수정] 활성 KRW 마켓으로 사전 필터 (상폐 코인 제외)
+            try:
+                active = set(await asyncio.to_thread(pyupbit.get_tickers, fiat="KRW") or [])
+            except Exception:
+                active = set()
+            if active:
+                ml_predictions = {t: d for t, d in ml_predictions.items() if t in active}
+            if not ml_predictions:
                 return
-            if isinstance(current_prices, (float, int)):
-                current_prices = {tickers[0]: current_prices}
+
+            # [버그수정] batch 호출 + 실패 시 개별 호출 fallback
+            # (배치 중 단일 상폐 ticker로 전체 실패하던 'Code not found' 회피)
+            tickers = list(ml_predictions.keys())
+            current_prices: dict = {}
+            BATCH = 100
+            for i in range(0, len(tickers), BATCH):
+                chunk = tickers[i:i + BATCH]
+                try:
+                    res = await asyncio.to_thread(pyupbit.get_current_price, chunk)
+                    if isinstance(res, dict):
+                        current_prices.update(res)
+                    elif isinstance(res, (int, float)) and len(chunk) == 1:
+                        current_prices[chunk[0]] = float(res)
+                except Exception as e:
+                    # 배치 실패 → 개별 호출로 살릴 수 있는 만큼 살림
+                    print(f">>> ⚠️ [ML Eval] batch {i}-{i+len(chunk)} 실패, 개별 호출: {e}")
+                    for t in chunk:
+                        try:
+                            p = await asyncio.to_thread(pyupbit.get_current_price, t)
+                            if p and isinstance(p, (int, float)):
+                                current_prices[t] = float(p)
+                        except Exception:
+                            continue
+            if not current_prices:
+                print(">>> ⚠️ [ML Eval] 현재 가격 전부 조회 실패")
+                return
 
             # 예측 vs 실제 비교
             correct = 0
