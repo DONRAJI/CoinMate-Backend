@@ -948,6 +948,41 @@ self.ADAPTIVE_ML_MIN_SAMPLE = 30       # 표본 부족 시 비활성
 
 ---
 
+### 세션 18 (6/2): Probability Calibration (Isotonic) 적용
+
+#### 문제 진단
+- 6일치 ml_accuracy_log 분석 결과 **calibration error 평균 +40%p** 발견
+- 예: ML 70~80% 구간 → 실제 양성률 26.7% (49%p 차이)
+- 원인: XGBoost raw output은 분류는 잘하지만 **확률값 자체는 의미 없음** (단순 결정경계만 의미)
+
+#### 적용한 calibration (`ml_predictor.train()`)
+- **3-way 시계열 분할**: 70% 학습 / 15% 보정(cal) / 15% 테스트
+  - 학습 set: XGBoost fit
+  - 보정 set: `sklearn.isotonic.IsotonicRegression` fit (raw → 실제 확률 매핑)
+  - 테스트 set: 보정 전후 비교 평가
+- `predict()` / `predict_with_reasons()`: calibrator 있으면 자동 보정 적용
+- 모델 저장 포맷: `{model, calibrator, feature_names, score, train_date}` (옛 모델은 calibrator=None, 자연스럽게 후방호환)
+
+#### 즉시 효과 (학습 직후 측정)
+- 테스트 평균확률: 미보정 52.5% → **보정 68.6%** (실제 양성률 67.9%에 0.7%p 차이로 일치)
+- 테스트 정확도: 미보정 64.7% → **보정 69.5%** (+4.8%p)
+- 실시간 분포 (전체 244 코인): 6/01 평균 49% → **6/02 평균 36.2%**
+- ≥70% 코인: 9개 → 3개 (강한 신호만 남음, 약한 시그널 자동 차단)
+
+#### 학습 자동화 호환
+- 매일 자정 학습 사이클에서 자동 calibration 적용
+- 적응형 임계값(percentile 85, 세션17)과 함께 두 안전망 작동
+- "ML 70% = 실제 70%"가 진짜로 성립 → 매수 임계값/Kelly 자금관리 모두 더 정확
+
+#### 변경 파일
+- `app/services/ml_predictor.py` (__init__, _save_model, _load_model, train, predict, predict_with_reasons)
+
+#### 다음 검증 포인트
+- 6/3~6/9 동안 ml_accuracy_log의 calibration error 추세 (목표: ≤10%p)
+- Top10 평균 실현 변동률이 음수에서 양수로 전환되는지
+
+---
+
 ## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
 
 ### 🟠 마이그레이션 후 발견된 작은 버그 (시간 날 때)
