@@ -183,6 +183,8 @@ class NewsCollector:
         self._summary_cache: dict[str, dict] = {}
         self._summary_cache_ts = 0
         self.SUMMARY_CACHE_TTL = 60
+        # [Phase 1C] critical 알림 중복 방지 — 보낸 external_id 추적 (최근 200개)
+        self._alerted_critical_ids: set[str] = set()
 
     def get_all_ticker_summaries(self, hours: int = 24) -> dict:
         """모든 ticker의 N시간 sentiment 집계 (1회 SQL + 1분 캐시).
@@ -389,7 +391,7 @@ class NewsCollector:
                 sources_used.append("cryptopanic")
                 all_articles.extend(cp)
 
-            new_count, crit_count, _ = self.score_and_save(all_articles)
+            new_count, crit_count, critical_items = self.score_and_save(all_articles)
 
             self._stats["last_run"] = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
             self._stats["last_fetched"] = len(all_articles)
@@ -403,9 +405,63 @@ class NewsCollector:
                 f"수집 {len(all_articles)}건, 신규 {new_count}건, 치명적 {crit_count}건"
                 f"{' (' + '+'.join(sources_used) + ')' if sources_used else ''}"
             )
+
+            # [Phase 1C] 보유 코인 critical 뉴스 알림 (신규 critical만, 중복 방지)
+            if critical_items:
+                await self._alert_critical_for_holdings(critical_items, all_articles)
         except Exception as e:
             print(f"⚠️ [News/run] {e}")
             self._stats["errors"] += 1
+
+    async def _alert_critical_for_holdings(
+        self, critical_items: list[tuple[str, str]], all_articles: list[dict]
+    ):
+        """보유 코인과 매칭되는 critical 뉴스만 Discord 알림 (중복 방지)."""
+        if not critical_items:
+            return
+        # 보유 코인 ticker 추출 (KRW-XXX → XXX)
+        try:
+            from app.services.trade_manager import trade_manager
+            open_trades = trade_manager.repo.get_open_trades()
+            held = {t["ticker"].replace("KRW-", "").upper() for t in open_trades}
+        except Exception as e:
+            print(f"⚠️ [News/alert] 보유 조회 실패: {e}")
+            return
+        if not held:
+            return
+
+        # critical_items: [(tickers_str, title), ...] — 표제만 있음. URL/source는 all_articles에서 매칭
+        title_to_article = {a.get("title", ""): a for a in all_articles}
+
+        for tickers_str, title in critical_items:
+            article = title_to_article.get(title, {})
+            ext_id = article.get("external_id") or title
+            if ext_id in self._alerted_critical_ids:
+                continue  # 이미 알림 보냄
+            # 해당 기사에 보유 코인 포함?
+            article_tickers = {t.strip().upper() for t in (tickers_str or "").split(",") if t.strip()}
+            matched = held & article_tickers
+            if not matched:
+                continue
+            # 알림 전송
+            try:
+                from app.services import notifier
+                for tk in matched:
+                    await notifier.notify_critical_news(
+                        ticker=tk,
+                        title=title,
+                        url=article.get("url", ""),
+                        source=article.get("source", "unknown"),
+                        position_info=f"보유 중 (KRW-{tk})",
+                    )
+            except Exception as e:
+                print(f"⚠️ [News/alert] 전송 실패: {e}")
+            self._alerted_critical_ids.add(ext_id)
+
+        # 캐시 상한 (메모리 보호)
+        if len(self._alerted_critical_ids) > 200:
+            # 단순화: 오래된 절반 버리기 (set 정렬 불가라 그냥 비움)
+            self._alerted_critical_ids = set(list(self._alerted_critical_ids)[-100:])
 
     async def loop(self):
         await asyncio.sleep(5)

@@ -8,6 +8,7 @@ from app.api import market_api, trade_api, ws_api, news_api
 from app.services.collector import start_collector_thread
 from app.services.trade_manager import trade_manager
 from app.services.news_collector import news_collector
+from app.services import notifier
 from app.core.config import ALLOWED_ORIGINS
 
 # 전역 변수
@@ -42,12 +43,25 @@ async def lifespan(app: FastAPI):
     news_task = asyncio.create_task(news_collector.loop())
     print(">>> 🗞️ [System] News collector 루프 시작됨 (15분 주기)")
 
+    # 6. [신규] 일일 요약 루프 (KST 23:50 자동)
+    summary_task = asyncio.create_task(trade_manager.daily_summary_loop())
+    print(">>> 📊 [System] Daily summary 루프 시작됨 (23:50 KST)")
+
+    # Lifecycle 알림 — 시작
+    asyncio.create_task(notifier.notify_lifecycle("startup", "✅ 모든 서비스 정상 가동"))
+
     yield
 
     print("\n>>> 🔴 [System] 서버 종료 절차 시작...")
+    # Lifecycle 알림 — 종료 (await: 종료 전 발송 보장)
+    try:
+        await notifier.notify_lifecycle("shutdown", "서비스 정상 종료")
+    except Exception:
+        pass
     if loop_task: loop_task.cancel()
     if ws_task: ws_task.cancel()
     if news_task: news_task.cancel()
+    if summary_task: summary_task.cancel()
     if collector: collector.stop()
     print(">>> 👋 [System] Bye Bye!")
 

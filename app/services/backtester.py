@@ -90,8 +90,21 @@ class Backtester:
 
                 # ML 모델 학습 (수집한 OHLCV 활용)
                 if self.ohlcv_cache:
+                    prev_score = self.ml.train_score
+                    n_train = sum(len(df) for df in self.ohlcv_cache.values() if df is not None)
                     await asyncio.to_thread(self.ml.train, self.ohlcv_cache)
                     self.ohlcv_cache.clear()  # 메모리 해제
+                    # Discord: ML 학습 완료 알림
+                    try:
+                        from app.services import notifier
+                        asyncio.create_task(notifier.notify_ml_trained(
+                            score=self.ml.train_score,
+                            cal_diff_pct=None,  # 학습 로그에 자세히 있음
+                            n_train=n_train,
+                            prev_score=prev_score if prev_score else None,
+                        ))
+                    except Exception as e:
+                        print(f">>> ⚠️ [ML alert] {e}")
         except Exception as e:
             print(f">>> ❌ [Scan Error] {e}")
         finally:

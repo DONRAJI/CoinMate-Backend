@@ -222,6 +222,7 @@ class TradeManager:
                     regime = "bull"
                 else:
                     regime = "neutral"
+                prev_regime = self._market_regime_cache
                 self._market_regime_cache = regime
                 self._market_regime_ts = now
                 ma24_dev = (cur - ma24) / ma24 * 100 if ma24 > 0 else 0
@@ -232,6 +233,13 @@ class TradeManager:
                     "updated_ts": now,
                 }
                 print(f">>> 🌐 [Market] BTC레짐={regime} (MA24이격 {ma24_dev:+.1f}%, 6h {mom6:+.1f}%)")
+                # 레짐 전환 시 Discord 알림 (prev가 None이면 첫 판정이라 알림 X)
+                if prev_regime and prev_regime != regime:
+                    try:
+                        from app.services import notifier
+                        asyncio.create_task(notifier.notify_regime_change(prev_regime, regime, dict(self._market_regime_detail)))
+                    except Exception as e:
+                        print(f"⚠️ [Regime alert] {e}")
         except Exception as e:
             print(f"⚠️ [Market Regime Error] {e}")
             # 에러 시 직전 캐시가 있으면 그것을 사용
@@ -257,6 +265,75 @@ class TradeManager:
     def stop(self):
         self.is_active = False
         print(">>> 🛑 System STOPPED")
+
+    async def daily_summary_loop(self):
+        """KST 23:50 한 번씩 일일 요약 알림 (간단 sleep 기반)."""
+        from app.services import notifier
+        sent_date = None
+        while True:
+            try:
+                now = datetime.now(KST)
+                if now.hour == 23 and now.minute >= 50 and sent_date != now.date():
+                    stats = self._build_daily_summary()
+                    await notifier.notify_daily_summary(stats)
+                    sent_date = now.date()
+            except Exception as e:
+                print(f"⚠️ [Daily summary] {e}")
+            await asyncio.sleep(60)
+
+    def _build_daily_summary(self) -> dict:
+        """오늘 거래 요약 통계 (자정 알림용)."""
+        try:
+            with self.repo.get_conn() as conn:
+                conn.row_factory = __import__("sqlite3").Row
+                today = datetime.now(KST).strftime("%Y-%m-%d")
+                rows = conn.execute(
+                    """SELECT profit_rate, buy_amount FROM trades
+                       WHERE status='closed' AND DATE(sell_time)=? AND profit_rate IS NOT NULL""",
+                    (today,),
+                ).fetchall()
+            today_trades = len(rows)
+            wins = sum(1 for r in rows if r["profit_rate"] > 0)
+            win_rate = (wins / today_trades * 100) if today_trades > 0 else 0
+            today_pnl = sum(
+                (r["buy_amount"] or 0) * (1 - 0.0005) * (1 + (r["profit_rate"] or 0) / 100) * (1 - 0.0005)
+                - (r["buy_amount"] or 0)
+                for r in rows
+            )
+        except Exception:
+            today_trades, win_rate, today_pnl = 0, 0, 0
+
+        # 자산
+        krw = 0.0
+        total_assets = 0.0
+        open_count = self.repo.get_trade_count()
+        try:
+            balances = self.executor.get_all_balances()
+            if isinstance(balances, list):
+                for b in balances:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("currency") == "KRW":
+                        krw = float(b.get("balance", 0))
+                        total_assets += krw
+                    else:
+                        ticker = f"KRW-{b['currency']}"
+                        qty = float(b.get("balance", 0)) + float(b.get("locked", 0))
+                        cur = self.shared_data.get(ticker, {}).get("current_price", 0) if self.shared_data else 0
+                        total_assets += qty * cur
+        except Exception:
+            pass
+
+        regime_emoji = {"bull": "🐂 상승장", "neutral": "😐 중립", "bear": "🐻 하락장"}
+        return {
+            "today_trades": today_trades,
+            "today_win_rate": win_rate,
+            "today_pnl": int(today_pnl),
+            "total_assets": int(total_assets),
+            "krw_balance": int(krw),
+            "open_count": open_count,
+            "regime": regime_emoji.get(self._market_regime_cache or "neutral", "?"),
+        }
 
     async def run_loop(self):
         print(">>> 🔄 Main Loop Initialized...")
@@ -906,10 +983,36 @@ class TradeManager:
             # --- [2] 지갑 동기화 ---
             try:
                 real_balances = await asyncio.to_thread(self.executor.get_all_balances)
-                db_trades = self.repo.get_open_trades() 
+                db_trades = self.repo.get_open_trades()
                 db_tickers = [t['ticker'] for t in db_trades]
                 real_wallet_tickers = []
-                
+
+                # 🔥 [안전장치] 업비트 API 인증 실패 감지 → 좀비 청산 차단 + Discord 알림
+                # (이전 INJ 사고: get_balances가 {error:...} 또는 빈 list 반환 시 "지갑 비었음"
+                #  으로 오해해 close_zombie 호출했던 버그 재발 방지)
+                api_failed = False
+                if isinstance(real_balances, dict) and real_balances.get("error"):
+                    api_failed = True
+                    detail = str(real_balances.get("error"))
+                elif not isinstance(real_balances, list):
+                    api_failed = True
+                    detail = f"비정상 응답: {type(real_balances).__name__}"
+                elif len(real_balances) == 0 and db_trades:
+                    # 보유 거래는 있는데 잔고 응답 빈 list = 의심스러움
+                    api_failed = True
+                    detail = "empty list (보유 거래 있음에도)"
+
+                if api_failed:
+                    if not getattr(self, "_last_upbit_auth_alert", 0) or time.time() - self._last_upbit_auth_alert > 3600:
+                        try:
+                            from app.services import notifier
+                            asyncio.create_task(notifier.notify_upbit_auth_fail(detail))
+                        except Exception:
+                            pass
+                        self._last_upbit_auth_alert = time.time()
+                    print(f"⚠️ [Wallet Sync] 업비트 응답 이상: {detail} → 좀비 청산 건너뜀")
+                    raise RuntimeError(f"upbit balance api failed: {detail}")
+
                 if isinstance(real_balances, list):
                     for b in real_balances:
                         if not isinstance(b, dict) or b['currency'] == 'KRW': continue
