@@ -983,6 +983,61 @@ self.ADAPTIVE_ML_MIN_SAMPLE = 30       # 표본 부족 시 비활성
 
 ---
 
+### 세션 19 (6/2): Discord 알림 6종 추가 + Embed 포맷 + 좀비 청산 안전장치
+
+#### 사용자 요청
+- 현재 Discord 알림 무엇이 있는지 확인 + 가치 있는 추가 연동 모두 진행
+
+#### 기존 알림 (3종)
+- 매수 체결 / 매도 체결 / 에러
+- 헬스체크 별도 (`health_check.sh`가 직접 webhook)
+
+#### 신규 알림 (6종) — `notifier.py` 전면 재작성 (Embed 포맷)
+| # | 함수 | 트리거 | 색상 |
+|---|---|---|---|
+| 1 | `notify_lifecycle` | 서버 시작/종료 (main.py lifespan) | 🟣 purple |
+| 2 | `notify_critical_news` | 보유 코인 + critical 뉴스 매칭 (Phase 1C) | 🔴 red |
+| 3 | `notify_daily_summary` | 매일 23:50 KST (`daily_summary_loop`) | 🟢/🔴 (손익) |
+| 4 | `notify_ml_trained` | 매일 자정 ML 학습 후 (`backtester.run_daily_scan`) | 🔵 blue |
+| 5 | `notify_regime_change` | BTC 레짐 전환 시 (`_get_market_regime`) | bull🟢/neutral⚫/bear🔴 |
+| 6 | `notify_upbit_auth_fail` | 업비트 API 인증 실패 (1시간 throttle) | 🔴 red |
+
+#### Embed 포맷 (vs 이전 plain text)
+- title + description + color + fields(name/value/inline) + footer + ISO timestamp
+- 색상 가이드: green(0x2ECC71), blue(0x3498DB), yellow(0xF1C40F), red(0xE74C3C), purple(0x9B59B6), gray(0x95A5A6)
+- 기존 notify_buy/sell/error도 Embed로 자연스럽게 업그레이드 (호환성 유지)
+
+#### 추가 안전장치: 좀비 청산 차단
+- 이전 마이그레이션 시 INJ가 잘못 close_zombie 처리됐던 버그 재발 방지
+- `update_target_coins` 진입부에서 `get_all_balances` 응답 검증:
+  - `{error: ...}` 응답
+  - 비정상 타입
+  - 빈 list + DB는 open 있음
+- 위 조건 시 → `notify_upbit_auth_fail` 발송 + 좀비 청산 로직 raise로 건너뜀
+- 1시간 throttle (`_last_upbit_auth_alert`)
+
+#### 중복 방지 (critical 뉴스)
+- `news_collector._alerted_critical_ids` set으로 보낸 external_id 추적
+- 200개 상한 + 절반 prune (메모리 보호)
+
+#### 일일 요약 데이터
+- 오늘 closed 거래 건수/승률/손익 (수수료 왕복 반영)
+- 총 자산/주문가능 KRW (실시간 잔고 조회)
+- 보유 코인 수, BTC 레짐 이모지
+
+#### 변경 파일
+- `app/services/notifier.py` (Embed 포맷, 6 새 함수)
+- `app/main.py` (lifecycle 알림 + daily_summary_loop task)
+- `app/services/trade_manager.py` (daily_summary_loop + 좀비 청산 안전장치 + 레짐 전환 알림)
+- `app/services/news_collector.py` (보유 코인 critical 알림 + 중복 방지)
+- `app/services/backtester.py` (ML 학습 완료 알림)
+
+#### 검증 (배포 후)
+- startup 시 lifecycle 알림 자동 발송
+- 테스트 호출 3종 (일일요약/레짐전환/ML학습) Discord 도착 확인
+
+---
+
 ## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
 
 ### 🟠 마이그레이션 후 발견된 작은 버그 (시간 날 때)
