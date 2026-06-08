@@ -1038,6 +1038,50 @@ self.ADAPTIVE_ML_MIN_SAMPLE = 30       # 표본 부족 시 비활성
 
 ---
 
+### 세션 20 (6/8): 분봉 ML 모델 v3 적용 (Colab 학습)
+
+#### 배경 — ML 모델 근본 개선
+- 기존 일봉 모델 한계: 라벨 "다음날 1%+ 터치" = 실제 매매 승률과 무관, calibration 후에도 의미 모호
+- **Colab에서 5분봉 1년치 + forward-simulation 라벨로 재학습**
+  - 라벨: 매수 후 1일 내 **익절(+3.5%)이 손절(-2%)보다 먼저 닿으면 1** = "봇이 익절할 확률"
+  - 노트북: `notebooks/CoinMate_ML_Minute_Training.ipynb` (사용자가 제미나이로 편집한 11피처 버전 사용)
+  - 결과: **테스트 정확도 71.1%** (일봉 62%보다 향상), Isotonic calibration 포함
+
+#### 모델 사양 (xgb_model_minute_20260608)
+- **11 피처**: volatility(20봉 std), ma_5/20/60(원시 가격), rsi(14 rolling), macd/signal/hist(12/26/9 raw), volume_ma_5/20, daily_range_pct
+- ⚠️ ma/macd/volume이 **원시 절대값** (비율 아님) — Colab 노트북과 1:1 동일해야 작동
+- calibrator: IsotonicRegression (sklearn 1.6→1.8 버전 경고 있으나 정상 작동)
+
+#### 서버 변경
+1. `ml_predictor.build_features`: 11피처로 **완전 교체** (Colab과 1:1, 임의수정 금지)
+   - FEATURE_LABELS 11개 갱신, get_status version "v3-minute5"
+   - 최소 60봉 필요 (ma_60)
+2. **자동 재학습 OFF** (`backtester.run_daily_scan`): 일봉 데이터 재학습이 분봉 모델을 덮어쓰므로 비활성. 모델은 Colab에서 학습→수동 업로드(월 1회 권장)
+3. **minute5 추론 파이프라인**:
+   - `get_smart_candles`: minute5(count 200) 추가 fetch → `cached_5m_dfs`
+   - `process_buying` + `refresh_target_scores`: ML 예측을 minute5로
+   - `backtester._analyze_one`: 일일스캔 ml_prob도 minute5로 (count 200)
+   - `market_api analysis`: 모달도 minute5
+
+#### 검증 (배포 후)
+- build_features 컬럼 == 모델 feature_names (순서까지 일치) ✓
+- 추론 정상: BTC 0.139, ETH/XRP 0.202, PROVE 0.311 (코인별 다양, calibrated)
+- 모달 SHAP: MA20/60/5 하락기여, 변동성 상승기여 → 약세장 정확 반영
+- 약세장이라 전반적으로 낮은 확률 (익절보다 손절 먼저 닿을 확률 높음) = 의미 정합적
+
+#### 모델 재학습 사이클 (운영 가이드)
+1. Colab 노트북 재실행 (데이터 캐시 덕에 신규분만 다운)
+2. 새 `.pkl` 다운로드
+3. `scp ... ec2-user@43.201.190.36:/home/ec2-user/CoinMate-Backend/models/xgb_model.pkl`
+4. `sudo systemctl restart coinmate`
+5. ⚠️ Colab build_features 바꾸면 서버 `ml_predictor.build_features`도 동일하게 교체 필수
+
+#### 중요 의미 변화
+- 이제 **"ML 70% = 봇이 익절할 확률 70%"** (이전: "1% 터치 확률")
+- ML 확률이 실제 매매 승률과 직접 연결 → Kelly 자금관리 + 적응형 임계값이 더 정확
+
+---
+
 ## 당장 해야 하는 개선점 (P2 완료 — 다음은 장기 로드맵 Phase 1~4)
 
 ### 🟠 마이그레이션 후 발견된 작은 버그 (시간 날 때)
