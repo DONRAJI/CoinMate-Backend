@@ -88,23 +88,11 @@ class Backtester:
                 self._save_report_txt()
                 print(f">>> 💾 [Save] 저장 완료 ({len(self.results_cache)}개)")
 
-                # ML 모델 학습 (수집한 OHLCV 활용)
-                if self.ohlcv_cache:
-                    prev_score = self.ml.train_score
-                    n_train = sum(len(df) for df in self.ohlcv_cache.values() if df is not None)
-                    await asyncio.to_thread(self.ml.train, self.ohlcv_cache)
-                    self.ohlcv_cache.clear()  # 메모리 해제
-                    # Discord: ML 학습 완료 알림
-                    try:
-                        from app.services import notifier
-                        asyncio.create_task(notifier.notify_ml_trained(
-                            score=self.ml.train_score,
-                            cal_diff_pct=None,  # 학습 로그에 자세히 있음
-                            n_train=n_train,
-                            prev_score=prev_score if prev_score else None,
-                        ))
-                    except Exception as e:
-                        print(f">>> ⚠️ [ML alert] {e}")
+                # 🔥 [분봉 모델 v3] 자동 재학습 비활성화.
+                # 모델은 Colab(분봉 5분, forward-sim 라벨)에서 학습 후 수동 업로드한다.
+                # 일봉 데이터로 서버에서 재학습하면 분봉 모델을 덮어쓰므로 금지.
+                # (재활성화하려면 ML_AUTO_TRAIN=True + minute 데이터 수집 로직 필요)
+                self.ohlcv_cache.clear()  # 메모리 해제만
         except Exception as e:
             print(f">>> ❌ [Scan Error] {e}")
         finally:
@@ -294,11 +282,16 @@ class Backtester:
 
             strategies = {k: int(v) for k, v in strategy_res['strategies'].items()}
             
-            # ML 확률 계산 (학습된 모델이 있을 때)
+            # ML 확률 계산 (분봉 모델 v3 — minute5 데이터 사용)
+            # ⚠️ 모델이 minute5로 학습됨 → 일봉(df) 아닌 minute5를 입력해야 함
             ml_prob = None
             if self.ml.is_trained:
                 try:
-                    ml_prob = float(self.ml.predict(df))
+                    df_5m = await asyncio.to_thread(
+                        pyupbit.get_ohlcv, ticker, interval="minute5", count=200
+                    )
+                    if df_5m is not None and len(df_5m) >= 60:
+                        ml_prob = float(self.ml.predict(df_5m))
                 except Exception:
                     ml_prob = None
 

@@ -151,172 +151,51 @@ class MLPredictor:
             return {"status": "error", "message": str(e)}
 
     def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """[분봉 모델 v3] Colab 학습 노트북의 build_features와 1:1 동일 (11개 피처).
+
+        ⚠️ 절대 임의 수정 금지 — Colab 학습 코드와 정확히 일치해야 모델이 정상 작동.
+        ⚠️ minute5 데이터로 학습됨 → 추론도 반드시 minute5 OHLCV df를 입력해야 함.
+
+        피처: volatility, ma_5, ma_20, ma_60, rsi, macd, macd_signal, macd_hist,
+              volume_ma_5, volume_ma_20, daily_range_pct
         """
-        OHLCV DataFrame에서 ML 피처 생성
-        Strategy에서 이미 계산하는 지표들을 재활용
-        """
-        if df is None or len(df) < 50:
+        # ma_60 + 워밍업 위해 최소 60봉 필요
+        if df is None or len(df) < 60:
             return pd.DataFrame()
 
-        feat = pd.DataFrame(index=df.index)
+        features = pd.DataFrame(index=df.index)
 
-        close = df['close']
-        high = df['high']
-        low = df['low']
-        volume = df['volume']
-        open_p = df['open']
+        # 가격 변동성 (종가 20봉 표준편차)
+        features['volatility'] = df['close'].rolling(window=20).std()
 
-        # --- 가격 기반 ---
-        feat['return_1d'] = close.pct_change(1) * 100
-        feat['return_3d'] = close.pct_change(3) * 100
-        feat['return_5d'] = close.pct_change(5) * 100
-        feat['return_10d'] = close.pct_change(10) * 100
+        # 이동 평균선 (원시 가격값)
+        features['ma_5'] = df['close'].rolling(window=5).mean()
+        features['ma_20'] = df['close'].rolling(window=20).mean()
+        features['ma_60'] = df['close'].rolling(window=60).mean()
 
-        # 이동평균 대비 위치
-        ma5 = close.rolling(5).mean()
-        ma10 = close.rolling(10).mean()
-        ma20 = close.rolling(20).mean()
-        feat['ma5_ratio'] = (close / ma5 - 1) * 100
-        feat['ma10_ratio'] = (close / ma10 - 1) * 100
-        feat['ma20_ratio'] = (close / ma20 - 1) * 100
-        feat['ma5_ma20_cross'] = (ma5 / ma20 - 1) * 100
+        # RSI (rolling mean 방식 14)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss.replace(0, 1e-9)
+        features['rsi'] = 100 - (100 / (1 + rs))
 
-        # --- RSI ---
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0).ewm(alpha=1/14, min_periods=14).mean()
-        loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, min_periods=14).mean()
-        rs = gain / loss.replace(0, 0.0001)
-        feat['rsi'] = 100 - (100 / (1 + rs))
+        # MACD (12/26/9, 원시 가격 스케일)
+        exp1 = df['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['close'].ewm(span=26, adjust=False).mean()
+        features['macd'] = exp1 - exp2
+        features['macd_signal'] = features['macd'].ewm(span=9, adjust=False).mean()
+        features['macd_hist'] = features['macd'] - features['macd_signal']
 
-        # --- MFI ---
-        tp = (high + low + close) / 3
-        mf = tp * volume
-        pos_flow = pd.Series(0.0, index=df.index)
-        neg_flow = pd.Series(0.0, index=df.index)
-        tp_delta = tp.diff()
-        pos_flow[tp_delta > 0] = mf[tp_delta > 0]
-        neg_flow[tp_delta < 0] = mf[tp_delta < 0]
-        pos_sum = pos_flow.rolling(14).sum()
-        neg_sum = neg_flow.rolling(14).sum().replace(0, 0.0001)
-        feat['mfi'] = 100 - (100 / (1 + pos_sum / neg_sum))
+        # 거래량 이동평균 (원시값)
+        features['volume_ma_5'] = df['volume'].rolling(window=5).mean()
+        features['volume_ma_20'] = df['volume'].rolling(window=20).mean()
 
-        # --- MACD ---
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        feat['macd_diff'] = macd_line - signal_line
-        feat['macd_ratio'] = feat['macd_diff'] / close * 100
+        # (고가 - 저가) / 종가 * 100
+        features['daily_range_pct'] = (df['high'] - df['low']) / df['close'] * 100
 
-        # --- ADX ---
-        up_move = high.diff()
-        down_move = -low.diff()
-        pdm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        mdm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        pdm_s = pd.Series(pdm, index=df.index).ewm(alpha=1/14, min_periods=14).mean()
-        mdm_s = pd.Series(mdm, index=df.index).ewm(alpha=1/14, min_periods=14).mean()
-        prev_close = close.shift(1)
-        tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        tr_smooth = tr.ewm(alpha=1/14, min_periods=14).mean().replace(0, 0.0001)
-        pdi = 100 * pdm_s / tr_smooth
-        mdi = 100 * mdm_s / tr_smooth
-        dx = (abs(pdi - mdi) / (pdi + mdi).replace(0, 0.0001)) * 100
-        feat['adx'] = dx.ewm(alpha=1/14, min_periods=14).mean()
-        feat['di_diff'] = pdi - mdi
-
-        # --- 볼린저 밴드 ---
-        bb_ma = close.rolling(20).mean()
-        bb_std = close.rolling(20).std()
-        feat['bb_position'] = (close - (bb_ma - 2 * bb_std)) / (4 * bb_std.replace(0, 0.0001))
-
-        # --- 거래량 ---
-        vol_ma20 = volume.rolling(20).mean().replace(0, 1)
-        feat['vol_ratio'] = volume / vol_ma20
-        feat['vol_change'] = volume.pct_change(1) * 100
-
-        # --- ATR ---
-        atr = tr.rolling(14).mean()
-        feat['atr_ratio'] = atr / close * 100
-
-        # --- 캔들 패턴 ---
-        body = abs(close - open_p)
-        total_range = (high - low).replace(0, 0.0001)
-        feat['body_ratio'] = body / total_range
-        feat['upper_wick'] = (high - pd.concat([close, open_p], axis=1).max(axis=1)) / total_range
-        feat['is_bullish'] = (close > open_p).astype(int)
-
-        # --- 변동성 ---
-        feat['volatility_5d'] = close.pct_change().rolling(5).std() * 100
-        feat['volatility_10d'] = close.pct_change().rolling(10).std() * 100
-
-        # --- [추가] 시간 패턴 ---
-        if hasattr(df.index, 'hour'):
-            feat['hour'] = df.index.hour
-        else:
-            feat['hour'] = 12  # fallback
-
-        # --- [추가] 가격 모멘텀 가속도 ---
-        feat['momentum_accel'] = feat.get('return_1d', close.pct_change(1)*100).diff()
-
-        # --- [추가] 거래량 가격 상관 (5일) ---
-        feat['vol_price_corr'] = close.rolling(5).corr(volume)
-
-        # --- [추가] 고가/저가 범위 비율 ---
-        feat['hl_range_pct'] = ((high - low) / close) * 100
-
-        # --- [추가] RSI 변화율 (모멘텀의 모멘텀) ---
-        feat['rsi_change'] = feat['rsi'].diff()
-
-        # --- [추가] 연속 양봉/음봉 수 ---
-        is_up = (close > open_p).astype(int)
-        groups = (is_up != is_up.shift()).cumsum()
-        feat['consecutive_candles'] = is_up.groupby(groups).cumsum() - (1 - is_up).groupby(groups).cumsum()
-
-        # --- [v2] 거래대금 (volume * close) ---
-        trade_value = volume * close
-        tv_ma20 = trade_value.rolling(20).mean().replace(0, 1)
-        feat['trade_value_ratio'] = trade_value / tv_ma20
-
-        # --- [v2] OBV (On-Balance Volume) 변화율 ---
-        obv = (np.sign(close.diff()) * volume).cumsum()
-        obv_ma10 = obv.rolling(10).mean().replace(0, 0.0001)
-        feat['obv_ratio'] = (obv / obv_ma10 - 1) * 100
-
-        # --- [v2] 지지/저항 근접도 ---
-        high_20 = high.rolling(20).max()
-        low_20 = low.rolling(20).min()
-        price_range = (high_20 - low_20).replace(0, 0.0001)
-        feat['support_resistance_pos'] = (close - low_20) / price_range
-
-        # --- [v2] 변동성 수축/확장 (BB Width) ---
-        bb_width = (4 * bb_std) / bb_ma.replace(0, 0.0001) * 100
-        bb_width_ma = bb_width.rolling(10).mean().replace(0, 0.0001)
-        feat['bb_width_ratio'] = bb_width / bb_width_ma
-
-        # --- [v2] 거래량 트렌드 (5일 vs 20일) ---
-        vol_ma5 = volume.rolling(5).mean().replace(0, 1)
-        feat['vol_trend'] = vol_ma5 / vol_ma20
-
-        # --- [v2] 가격-거래량 다이버전스 ---
-        price_up = close.diff() > 0
-        vol_down = volume.diff() < 0
-        feat['price_vol_divergence'] = (price_up & vol_down).astype(int)
-
-        # --- [v2] 이동평균 정배열/역배열 점수 ---
-        ma_align = (
-            (ma5 > ma10).astype(int) +
-            (ma10 > ma20).astype(int) +
-            (close > ma5).astype(int)
-        )
-        feat['ma_alignment'] = ma_align
-
-        # --- [v2] 하락 후 반등 패턴 ---
-        feat['drawdown_5d'] = (close / high.rolling(5).max() - 1) * 100
-        feat['bounce_from_low'] = (close / low.rolling(5).min() - 1) * 100
-
-        # NaN 제거
-        feat = feat.replace([np.inf, -np.inf], np.nan)
-        return feat
+        features = features.replace([np.inf, -np.inf], np.nan)
+        return features
 
     def train(self, all_ohlcv_dict: dict):
         """
@@ -462,21 +341,14 @@ class MLPredictor:
             traceback.print_exc()
 
     # 피처 이름 → 한글 설명 매핑
+    # [분봉 모델 v3] 11개 피처 한글 라벨 (SHAP 근거 표시용)
     FEATURE_LABELS = {
-        'return_1d': '1일 수익률', 'return_3d': '3일 수익률', 'return_5d': '5일 수익률', 'return_10d': '10일 수익률',
-        'ma5_ratio': 'MA5 이격도', 'ma10_ratio': 'MA10 이격도', 'ma20_ratio': 'MA20 이격도', 'ma5_ma20_cross': 'MA 골든크로스',
-        'rsi': 'RSI', 'mfi': 'MFI 자금흐름', 'macd_diff': 'MACD 차이', 'macd_ratio': 'MACD 비율',
-        'adx': 'ADX 추세강도', 'di_diff': 'DI 방향', 'bb_position': '볼린저 위치',
-        'vol_ratio': '거래량 폭발', 'vol_change': '거래량 변화', 'atr_ratio': 'ATR 변동성',
-        'body_ratio': '캔들 몸통', 'upper_wick': '윗꼬리', 'is_bullish': '양봉 여부',
-        'volatility_5d': '5일 변동성', 'volatility_10d': '10일 변동성',
-        'momentum_accel': '모멘텀 가속', 'vol_price_corr': '거래량-가격 상관',
-        'hl_range_pct': '고저 범위', 'rsi_change': 'RSI 변화',
-        'consecutive_candles': '연속 양봉/음봉', 'trade_value_ratio': '거래대금 비율',
-        'obv_ratio': 'OBV 비율', 'support_resistance_pos': '지지/저항 위치',
-        'bb_width_ratio': 'BB 수축/확장', 'vol_trend': '거래량 추세',
-        'price_vol_divergence': '가격-거래량 괴리', 'ma_alignment': '이평선 정배열',
-        'drawdown_5d': '5일 낙폭', 'bounce_from_low': '저점 반등', 'hour': '시간대',
+        'volatility': '변동성(20봉)',
+        'ma_5': 'MA5', 'ma_20': 'MA20', 'ma_60': 'MA60',
+        'rsi': 'RSI',
+        'macd': 'MACD', 'macd_signal': 'MACD 시그널', 'macd_hist': 'MACD 히스토그램',
+        'volume_ma_5': '거래량 MA5', 'volume_ma_20': '거래량 MA20',
+        'daily_range_pct': '고저 범위(%)',
     }
 
     def predict(self, df: pd.DataFrame) -> float:
@@ -579,6 +451,6 @@ class MLPredictor:
             "accuracy": self.train_score,
             "train_date": self.train_date or "-",
             "features": len(self.feature_names),
-            "version": "v2",
+            "version": "v3-minute5",
             "label_threshold": LABEL_THRESHOLD_PCT,
         }

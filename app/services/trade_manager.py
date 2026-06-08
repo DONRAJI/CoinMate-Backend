@@ -40,6 +40,7 @@ class TradeManager:
         # 캐시 및 쿨타임
         self.cached_day_dfs = {}
         self.cached_min_dfs = {}
+        self.cached_5m_dfs = {}   # [분봉 모델 v3] ML 추론용 minute5 캐시
         self.last_api_call_time = {}
         self.sell_timestamps = {}
 
@@ -685,8 +686,10 @@ class TradeManager:
             if not res: continue
 
             # ML 예측 + 근거 (UI 표시용 — 모든 종목)
-            if self.ml.is_trained:
-                ml_result = self.ml.predict_with_reasons(df_day)
+            # [분봉 모델 v3] minute5 데이터로 예측 (일봉 df_day 아님)
+            df_5m = self.cached_5m_dfs.get(ticker)
+            if self.ml.is_trained and df_5m is not None and len(df_5m) >= 60:
+                ml_result = self.ml.predict_with_reasons(df_5m)
                 res['ml_prob'] = ml_result['prob']
                 # 카드에 표시할 상위 3개 근거 (라벨만)
                 res['ml_top_reasons'] = [
@@ -1109,9 +1112,13 @@ class TradeManager:
             try:
                 df_day = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=60)
                 df_min = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute60", count=60)
+                # [분봉 모델 v3] ML 추론용 minute5 (ma_60 위해 최소 60봉, 여유 200봉)
+                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=200)
                 if df_day is not None:
                     self.cached_day_dfs[ticker] = df_day
                     self.cached_min_dfs[ticker] = df_min if df_min is not None else df_day
+                    if df_5m is not None:
+                        self.cached_5m_dfs[ticker] = df_5m
                     self.last_api_call_time[ticker] = now
             except Exception as e:
                 # 🔥 [시스템최적화] 조용한 에러 방지 (로그 출력)
@@ -1150,6 +1157,20 @@ class TradeManager:
                 res = self.strategy.get_ensemble_signal(df_day, df_min)
                 if not res:
                     continue
+
+                # [분봉 모델 v3] ML 예측 (minute5) — 매수루프가 조기 return해도 카드에 항상 표시
+                df_5m = self.cached_5m_dfs.get(ticker)
+                if self.ml.is_trained and df_5m is not None and len(df_5m) >= 60:
+                    ml_result = self.ml.predict_with_reasons(df_5m)
+                    res['ml_prob'] = ml_result['prob']
+                    res['ml_top_reasons'] = [
+                        {"label": r["label"], "direction": r["direction"], "value": r["value"]}
+                        for r in ml_result['reasons'][:3]
+                    ]
+                else:
+                    res['ml_prob'] = None
+                    res['ml_top_reasons'] = []
+
                 self.backtester.results_cache[ticker] = {
                     "ticker": ticker,
                     "win_rate": self.backtester.results_cache.get(ticker, {}).get('win_rate', 0),
@@ -1167,6 +1188,7 @@ class TradeManager:
                     "score_breakdown": res.get("score_breakdown", []),
                     "regime": res.get('regime', 'normal'),
                     "adx": res.get('adx', 0),
+                    "ml_prob": res.get('ml_prob'),
                 }
                 self._update_market_status(ticker, current_price, res)
                 refreshed += 1
@@ -1182,6 +1204,8 @@ class TradeManager:
             if ticker not in active_tickers: del self.cached_day_dfs[ticker]
         for ticker in list(self.cached_min_dfs.keys()):
             if ticker not in active_tickers: del self.cached_min_dfs[ticker]
+        for ticker in list(self.cached_5m_dfs.keys()):
+            if ticker not in active_tickers: del self.cached_5m_dfs[ticker]
         for ticker in list(self.last_api_call_time.keys()):
             if ticker not in active_tickers: del self.last_api_call_time[ticker]
         for ticker in list(self.high_watermarks.keys()):
