@@ -426,10 +426,12 @@ class Backtester:
         return [c['ticker'] for c in sorted_cands[:top_n]]
 
     def get_ml_top_coins(self, top_n=10):
-        """ML 상승 확률이 높은 코인 Top N 반환 (일일 스캔 결과 기반)"""
+        """[분봉 모델 v3] 익절 확률 상위 코인 Top N.
+        손익분기 36.4%(익절+3.5%/손절-2%) 이상만 표시 — 기대수익 + 인 코인.
+        """
         candidates = [
             c for c in self.results_cache.values()
-            if c.get('ml_prob') is not None and c['ml_prob'] > 0.5
+            if c.get('ml_prob') is not None and c['ml_prob'] >= 0.364
         ]
         sorted_cands = sorted(candidates, key=lambda x: x['ml_prob'], reverse=True)
         return sorted_cands[:top_n]
