@@ -113,6 +113,12 @@ class TradeManager:
         self.SHADOW_BUY_THRESHOLD = 5.0       # 완화 점수 기준
         self.SHADOW_ALLOW_ALL_REGIMES = True  # bear/neutral 포함 전 레짐 매수(게이트는 적용)
 
+        # ═══ [좀비 청산 안전장치] N회 연속 확인 후에만 청산 ═══
+        # 일시적/부분적 API 글리치(일부 코인만 누락)로 1회 읽기에 DB open trade가
+        # 잘못 청산되던 버그 방지. 지갑에서 연속 N회 안 보일 때만 close_zombie 실행.
+        self.zombie_strikes = {}          # ticker -> 연속 미발견 횟수
+        self.ZOMBIE_CONFIRM_COUNT = 3     # 3회 연속(≈update_target_coins 3주기) 후 청산
+
         # 설정값
         self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
@@ -1155,10 +1161,26 @@ class TradeManager:
                                 self.repo.log_buy(ticker, avg_price, total_val)
                                 db_tickers.append(ticker) 
 
+                # 🔥 [안전장치] 좀비 청산은 N회 연속 미발견 시에만 실행
+                # (1회 글리치로 멀쩡한 보유 trade가 사라지던 사고 방지)
                 for trade in db_trades:
-                    if trade['ticker'] not in real_wallet_tickers:
-                        self.repo.close_zombie_trade(trade['id'])
-                
+                    tkr = trade['ticker']
+                    if tkr not in real_wallet_tickers:
+                        self.zombie_strikes[tkr] = self.zombie_strikes.get(tkr, 0) + 1
+                        if self.zombie_strikes[tkr] >= self.ZOMBIE_CONFIRM_COUNT:
+                            print(f"🧹 [Zombie] {tkr} {self.zombie_strikes[tkr]}회 연속 지갑 미발견 → 청산 (trade #{trade['id']})")
+                            self.repo.close_zombie_trade(trade['id'])
+                            self.zombie_strikes.pop(tkr, None)
+                        else:
+                            print(f"⏳ [Zombie] {tkr} 지갑 미발견 {self.zombie_strikes[tkr]}/{self.ZOMBIE_CONFIRM_COUNT} (청산 보류)")
+                    else:
+                        # 지갑에 다시 보이면 strike 리셋
+                        self.zombie_strikes.pop(tkr, None)
+                # 더 이상 DB open이 아닌 ticker의 잔여 strike 정리
+                for tkr in list(self.zombie_strikes.keys()):
+                    if tkr not in db_tickers:
+                        self.zombie_strikes.pop(tkr, None)
+
                 final_open_tickers = self.repo.get_all_open_tickers()
                 for t in final_open_tickers:
                     if t in targets_map:
