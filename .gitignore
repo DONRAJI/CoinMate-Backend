@@ -30,3 +30,5 @@ logs/
 # 6. OS 생성 파일 (맥/윈도우 썸네일 등)
 .DS_Store
 Thumbs.db
+# 8. 개발 전용 문서 (로컬에서만 관리)
+CLAUDE.md
