@@ -17,6 +17,11 @@ PAPER_STATE_PATH = os.path.join(_BASE, "cache", "paper_state.json")
 
 INITIAL_KRW = 1_000_000  # 가상 시작 자금 100만원
 
+# 체결 슬리피지 가정 (편도) — 실거래는 시장가라 신호가와 체결가가 다름.
+# 매수는 신호가보다 높게, 매도는 낮게 체결된다고 가정해 실거래에 근접시킴.
+# 수수료(왕복 0.1%)와 별개. 거래대금 필터(10억↑)로 유동성 종목만 매수하므로 5bp로 설정.
+SLIPPAGE_RATE = 0.0005  # 0.05% 편도 (왕복 0.1% 추가 비용)
+
 
 def now_kst():
     return datetime.now(KST)
@@ -94,6 +99,8 @@ class PaperRepository:
         context = context or {}
         if amount > self.krw:
             return False
+        # 슬리피지: 매수는 신호가보다 높게 체결된다고 가정 (실거래 시장가 근사)
+        fill_price = price * (1 + SLIPPAGE_RATE)
         with self._conn() as c:
             c.execute(
                 """INSERT INTO paper_trades
@@ -101,7 +108,7 @@ class PaperRepository:
                  buy_score, buy_ml_prob, buy_regime, buy_rsi,
                  buy_news_sentiment, buy_news_critical_count, buy_orderbook_ratio)
                 VALUES (?,?,?,?,'open',?,?,?,?,?,?,?,?)""",
-                (ticker, price, amount, now_kst(), strategy_name,
+                (ticker, fill_price, amount, now_kst(), strategy_name,
                  context.get('score'), context.get('ml_prob'), context.get('regime'),
                  context.get('rsi'), context.get('news_sentiment'),
                  context.get('news_critical_count'), context.get('orderbook_ratio')),
@@ -109,7 +116,8 @@ class PaperRepository:
             c.commit()
         self.krw -= amount
         self._save_state()
-        print(f"📝 [Paper] 가상매수 {ticker} @{price:,.2f} ({amount:,.0f}원) 잔여KRW {self.krw:,.0f}")
+        print(f"📝 [Paper] 가상매수 {ticker} @{fill_price:,.2f}(신호 {price:,.2f}, 슬리피지 {SLIPPAGE_RATE:.2%}) "
+              f"({amount:,.0f}원) 잔여KRW {self.krw:,.0f}")
         return True
 
     def paper_sell(self, trade_id, sell_price, reason="Shadow"):
@@ -120,17 +128,20 @@ class PaperRepository:
                 return False
             buy_price = row['buy_price']
             buy_amount = row['buy_amount']
-            profit_rate = ((sell_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0
-            # 수수료 왕복 반영한 실현 금액
+            # 슬리피지: 매도는 신호가보다 낮게 체결된다고 가정
+            fill_sell = sell_price * (1 - SLIPPAGE_RATE)
+            profit_rate = ((fill_sell - buy_price) / buy_price) * 100 if buy_price > 0 else 0
+            # 수수료 왕복 0.1% 반영한 실현 금액 (슬리피지는 fill가에 이미 반영됨)
             realized = buy_amount * (1 - 0.0005) * (1 + profit_rate / 100) * (1 - 0.0005)
             c.execute(
                 "UPDATE paper_trades SET status='closed', sell_price=?, sell_time=?, sell_reason=?, profit_rate=? WHERE id=?",
-                (sell_price, now_kst(), reason, profit_rate, trade_id),
+                (fill_sell, now_kst(), reason, profit_rate, trade_id),
             )
             c.commit()
         self.krw += realized
         self._save_state()
-        print(f"📝 [Paper] 가상매도 {row['ticker']} 수익률 {profit_rate:+.2f}% → 잔여KRW {self.krw:,.0f}")
+        print(f"📝 [Paper] 가상매도 {row['ticker']} @{fill_sell:,.2f}(신호 {sell_price:,.2f}) "
+              f"수익률 {profit_rate:+.2f}% → 잔여KRW {self.krw:,.0f}")
         return True
 
     # ─────────────── 통계 ───────────────
