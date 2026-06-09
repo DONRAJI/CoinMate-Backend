@@ -179,10 +179,11 @@ class TradeManager:
             print(f">>> ⚠️ [Config] 저장 실패: {e}")
 
     def _restore_loss_state(self):
-        """재시작 시 DB의 최근 거래 결과로 연패 카운터 복원 (인메모리 초기화 방지)"""
+        """재시작 시 DB의 최근 거래 결과로 연패 카운터 복원 (인메모리 초기화 방지).
+        🔥 쿨오프는 '마지막 손절 시각' 기준으로 복원 → 재배포 반복해도 타이머가 리셋되지 않음.
+        """
         try:
-            rows = self.repo.get_closed_trades(limit=10)
-            # sell_time DESC로 오니까 시간순으로 뒤집어서 저장
+            rows = self.repo.get_closed_trades(limit=10)  # sell_time DESC
             results = []
             for r in reversed(rows):
                 pr = r['profit_rate'] if 'profit_rate' in r.keys() else None
@@ -190,6 +191,7 @@ class TradeManager:
                     continue
                 results.append(pr > 0)  # True=승, False=패
             self.recent_trade_results = results[-10:]
+
             consecutive = 0
             for win in reversed(self.recent_trade_results):
                 if not win:
@@ -198,12 +200,41 @@ class TradeManager:
                     break
             if consecutive > 0:
                 print(f">>> 🔁 [복원] 최근 거래 {len(self.recent_trade_results)}건, 현재 {consecutive}연패 상태")
+
             if consecutive >= self.CONSECUTIVE_LOSS_LIMIT:
-                # 이미 연패 중이면 쿨오프도 복원
                 self.cooloff_level = min(consecutive - self.CONSECUTIVE_LOSS_LIMIT + 1, self.MAX_COOLOFF_LEVEL)
                 duration = self.LOSS_COOLOFF_SECONDS * (2 ** (self.cooloff_level - 1))
-                self.loss_cooloff_until = time.time() + duration
-                print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 {duration//60}분 적용")
+
+                # 🔥 마지막 손절 시각(sell_time)을 기준으로 쿨오프 종료시점 계산
+                last_sell_ts = None
+                if rows:
+                    try:
+                        st = rows[0]['sell_time'] if 'sell_time' in rows[0].keys() else None
+                        if st:
+                            s = str(st).replace('T', ' ').split('.')[0].split('+')[0].strip()
+                            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                                try:
+                                    dt = datetime.strptime(s, fmt).replace(tzinfo=KST)
+                                    last_sell_ts = dt.timestamp()
+                                    break
+                                except ValueError:
+                                    continue
+                    except Exception:
+                        last_sell_ts = None
+
+                if last_sell_ts is None:
+                    # sell_time 파싱 실패 시에만 보수적으로 now 기준
+                    self.loss_cooloff_until = time.time() + duration
+                    print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 {duration//60}분 (시각 미상, now 기준)")
+                else:
+                    cooloff_end = last_sell_ts + duration
+                    remaining = cooloff_end - time.time()
+                    if remaining > 0:
+                        self.loss_cooloff_until = cooloff_end
+                        print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 잔여 {remaining/60:.0f}분 (마지막 손절 기준)")
+                    else:
+                        # 이미 쿨오프 시간이 지남 → 적용 안 함 (재배포 반복해도 안 걸림)
+                        print(f">>> ✅ [복원] {consecutive}연패지만 마지막 손절 후 {(-remaining)/3600:.1f}h 경과 → 쿨오프 해제됨")
         except Exception as e:
             print(f"⚠️ [Loss State Restore Error] {e}")
 
