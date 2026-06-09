@@ -155,6 +155,77 @@ async def notify_daily_summary(stats: dict):
     )
 
 
+async def notify_ml_eval_daily(entry: dict):
+    """[분봉 모델] 일일 예측 평가 결과 (익절확률 calibration)."""
+    pred = entry.get('predicted_avg_winrate', 0) * 100
+    actual = entry.get('actual_winrate', 0) * 100
+    calib = entry.get('calibration_error_pp', 0)
+    above_wr = entry.get('above_threshold_winrate')
+    above_n = entry.get('above_threshold_n', 0)
+    top10 = entry.get('top10_winrate', 0) * 100
+
+    # calibration 색상
+    if abs(calib) <= 8:
+        color = COLORS["green"]; cal_txt = f"{calib:+.1f}%p ✅ 양호"
+    elif calib > 0:
+        color = COLORS["yellow"]; cal_txt = f"{calib:+.1f}%p ⚠️ 과대평가"
+    else:
+        color = COLORS["yellow"]; cal_txt = f"{calib:+.1f}%p ⚠️ 과소평가"
+
+    fields = [
+        {"name": "평가 종목", "value": f"{entry.get('n_evaluated', 0)}개"},
+        {"name": "예측 평균 익절확률", "value": f"{pred:.1f}%"},
+        {"name": "실제 익절률", "value": f"{actual:.1f}%"},
+        {"name": "Calibration 오차", "value": cal_txt, "inline": False},
+        {"name": f"매수기준(42%)↑ {above_n}개", "value": f"실제익절 {(above_wr or 0)*100:.0f}%" if above_wr is not None else "해당없음"},
+        {"name": "Top10 실제익절", "value": f"{top10:.0f}%"},
+    ]
+    await _send_embed(
+        title=f"📊 분봉 모델 일일 평가 · {entry.get('date', '')}",
+        description='"예측한 익절확률대로 실제 익절/손절했는지" 검증',
+        color=color,
+        fields=fields,
+        footer="익절+3.5%가 손절-2%보다 먼저 닿으면 익절(win)",
+    )
+
+
+async def notify_ml_eval_weekly(review: dict):
+    """[분봉 모델] 주간 모델 점검 — 누적 진단 + 수정 방향 제안."""
+    pred = review.get('avg_predicted_winrate', 0) * 100
+    actual = review.get('avg_actual_winrate', 0) * 100
+    calib = review.get('avg_calibration_error_pp', 0)
+    above = review.get('avg_above_threshold_winrate')
+    recs = review.get('recommendations', [])
+
+    # 권장에 🔴 있으면 빨강, 🟡만 있으면 노랑, 아니면 파랑
+    joined = " ".join(recs)
+    if "🔴" in joined:
+        color = COLORS["red"]
+    elif "⚠️" in joined or "🟡" in joined:
+        color = COLORS["yellow"]
+    else:
+        color = COLORS["blue"]
+
+    fields = [
+        {"name": "집계 기간", "value": f"최근 {review.get('days_covered', 0)}일"},
+        {"name": "평균 예측", "value": f"{pred:.1f}%"},
+        {"name": "평균 실제", "value": f"{actual:.1f}%"},
+        {"name": "평균 calibration", "value": f"{calib:+.1f}%p", "inline": False},
+    ]
+    if above is not None:
+        fields.append({"name": "매수기준↑ 평균익절률", "value": f"{above*100:.0f}% (손익분기 36%)", "inline": False})
+    if recs:
+        fields.append({"name": "📋 진단 / 권장 방향", "value": "\n".join(recs), "inline": False})
+
+    await _send_embed(
+        title=f"📅 주간 모델 점검 · {review.get('date', '')}",
+        description="누적 평가 기반 모델 수정 방향 진단 (주 1회)",
+        color=color,
+        fields=fields,
+        footer="Colab 재학습 시 이 진단을 참고하세요",
+    )
+
+
 async def notify_ml_trained(score: float, cal_diff_pct: float | None, n_train: int,
                               prev_score: float | None = None):
     """매일 ML 학습 완료 후 결과."""

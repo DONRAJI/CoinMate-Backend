@@ -49,6 +49,8 @@ class Backtester:
 
         # 0. 전일 ML 예측 정확도 평가
         await self._evaluate_yesterday_predictions()
+        # 0-1. 주간 모델 점검 (7일마다)
+        await self._weekly_model_review()
 
         # 1. 캐시 파일 확인
         if os.path.exists(cache_file):
@@ -98,132 +100,255 @@ class Backtester:
         finally:
             self.is_running = False
 
+    # 봇 매매 룰 (trade_manager와 동기화 — 분봉 모델 라벨 정의)
+    EVAL_TP_PCT = 3.5
+    EVAL_SL_PCT = -2.0
+    EVAL_BUY_THRESHOLD = 0.42  # ML_MIN_PROB(bull)과 동기화
+
+    @staticmethod
+    def _simulate_tp_sl(entry_price, future_df, tp_pct=3.5, sl_pct=-2.0):
+        """[분봉 모델 평가] 진입 후 future 캔들에서 익절(+tp)이 손절(sl)보다 먼저 닿는지.
+        Returns: 1=익절 먼저(win), 0=손절 먼저 or 타임아웃(loss)
+        """
+        if future_df is None or len(future_df) == 0 or entry_price <= 0:
+            return None
+        tp_thresh = entry_price * (1 + tp_pct / 100)
+        sl_thresh = entry_price * (1 + sl_pct / 100)
+        for _, row in future_df.iterrows():
+            hit_tp = row['high'] >= tp_thresh
+            hit_sl = row['low'] <= sl_thresh
+            if hit_tp and hit_sl:
+                return 0  # 같은 캔들에 둘 다 → 보수적으로 손절
+            if hit_tp:
+                return 1
+            if hit_sl:
+                return 0
+        return 0  # 24h 내 익절 못함 = loss
+
     async def _evaluate_yesterday_predictions(self):
-        """전일 ML 예측과 실제 가격 변동을 비교하여 정확도 기록"""
+        """[분봉 모델 v3] 전일 익절확률 예측 vs 실제 TP/SL 결과로 calibration 평가"""
         try:
             yesterday = (datetime.now(KST) - timedelta(days=1)).strftime('%Y-%m-%d')
             yesterday_file = os.path.join(CACHE_DIR, f"analysis_{yesterday}.json")
             accuracy_file = os.path.join(CACHE_DIR, "ml_accuracy_log.json")
 
             if not os.path.exists(yesterday_file):
-                return
+                return None
+
+            # 예측 시점 = 파일 생성시각 (이 시점 가격으로 진입했다고 가정)
+            # pyupbit 인덱스는 tz-naive KST이므로 비교용도 naive로 맞춤
+            entry_time = datetime.fromtimestamp(os.path.getmtime(yesterday_file), tz=KST).replace(tzinfo=None)
+            eval_end = entry_time + timedelta(hours=24)
 
             with open(yesterday_file, 'r', encoding='utf-8') as f:
                 yesterday_data = json.load(f)
 
-            # 이미 평가했는지 확인
             accuracy_log = []
             if os.path.exists(accuracy_file):
                 with open(accuracy_file, 'r', encoding='utf-8') as f:
                     accuracy_log = json.load(f)
-                evaluated_dates = {entry['date'] for entry in accuracy_log}
-                if yesterday in evaluated_dates:
-                    return
+                if yesterday in {e['date'] for e in accuracy_log}:
+                    return None
 
-            # ML 확률이 있는 코인만 추출
             ml_predictions = {
-                t: d for t, d in yesterday_data.items()
-                if d.get('ml_prob') is not None
+                t: d for t, d in yesterday_data.items() if d.get('ml_prob') is not None
             }
-            if not ml_predictions:
-                return
-
-            # [버그수정] 활성 KRW 마켓으로 사전 필터 (상폐 코인 제외)
             try:
                 active = set(await asyncio.to_thread(pyupbit.get_tickers, fiat="KRW") or [])
+                if active:
+                    ml_predictions = {t: d for t, d in ml_predictions.items() if t in active}
             except Exception:
-                active = set()
-            if active:
-                ml_predictions = {t: d for t, d in ml_predictions.items() if t in active}
+                pass
             if not ml_predictions:
-                return
+                return None
 
-            # [버그수정] batch 호출 + 실패 시 개별 호출 fallback
-            # (배치 중 단일 상폐 ticker로 전체 실패하던 'Code not found' 회피)
-            tickers = list(ml_predictions.keys())
-            current_prices: dict = {}
-            BATCH = 100
-            for i in range(0, len(tickers), BATCH):
-                chunk = tickers[i:i + BATCH]
-                try:
-                    res = await asyncio.to_thread(pyupbit.get_current_price, chunk)
-                    if isinstance(res, dict):
-                        current_prices.update(res)
-                    elif isinstance(res, (int, float)) and len(chunk) == 1:
-                        current_prices[chunk[0]] = float(res)
-                except Exception as e:
-                    # 배치 실패 → 개별 호출로 살릴 수 있는 만큼 살림
-                    print(f">>> ⚠️ [ML Eval] batch {i}-{i+len(chunk)} 실패, 개별 호출: {e}")
-                    for t in chunk:
-                        try:
-                            p = await asyncio.to_thread(pyupbit.get_current_price, t)
-                            if p and isinstance(p, (int, float)):
-                                current_prices[t] = float(p)
-                        except Exception:
-                            continue
-            if not current_prices:
-                print(">>> ⚠️ [ML Eval] 현재 가격 전부 조회 실패")
-                return
-
-            # 예측 vs 실제 비교
-            correct = 0
-            total = 0
+            # 각 코인: 진입가부터 24h forward 시뮬 (minute15, 96봉 = 24h)
             details = []
+            to_str = eval_end.strftime('%Y-%m-%d %H:%M:%S')
             for ticker, pred in ml_predictions.items():
-                curr_price = current_prices.get(ticker)
-                if curr_price is None:
-                    continue
-                pred_price = pred.get('current_price', 0)
-                if pred_price <= 0:
-                    continue
-
-                actual_change_pct = ((curr_price - pred_price) / pred_price) * 100
+                entry_price = pred.get('current_price', 0)
                 ml_prob = pred['ml_prob']
-                predicted_up = ml_prob >= 0.5
-                actual_up = actual_change_pct >= 1.0  # 1%+ 상승이 label 기준
-
-                if predicted_up == actual_up:
-                    correct += 1
-                total += 1
-
+                if entry_price <= 0:
+                    continue
+                try:
+                    fdf = await asyncio.to_thread(
+                        pyupbit.get_ohlcv, ticker, interval="minute15", count=96, to=to_str
+                    )
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    continue
+                if fdf is None or len(fdf) < 4:
+                    continue
+                # 진입시각 이후 캔들만
+                future = fdf[fdf.index >= entry_time]
+                if len(future) < 2:
+                    future = fdf  # fallback
+                outcome = self._simulate_tp_sl(entry_price, future, self.EVAL_TP_PCT, self.EVAL_SL_PCT)
+                if outcome is None:
+                    continue
                 details.append({
                     "ticker": ticker,
                     "ml_prob": round(ml_prob, 4),
-                    "predicted_up": predicted_up,
-                    "actual_change_pct": round(actual_change_pct, 2),
-                    "actual_up": actual_up,
-                    "correct": predicted_up == actual_up,
+                    "actual_win": outcome,  # 1=익절, 0=손절/타임아웃
                 })
 
-            if total == 0:
-                return
+            if len(details) < 10:
+                print(f">>> ⚠️ [ML Eval] 평가 표본 부족 ({len(details)})")
+                return None
 
-            accuracy = round(correct / total * 100, 1)
+            n = len(details)
+            predicted_avg = sum(d['ml_prob'] for d in details) / n  # 예측 평균 익절확률
+            actual_win_rate = sum(d['actual_win'] for d in details) / n  # 실제 익절률
+            calib_error = (predicted_avg - actual_win_rate) * 100  # +면 과대평가
 
-            # 상위 확률 코인의 실제 성과
-            top_10 = sorted(details, key=lambda x: x['ml_prob'], reverse=True)[:10]
-            top_10_correct = sum(1 for d in top_10 if d['correct'])
-            top_10_avg_change = round(sum(d['actual_change_pct'] for d in top_10) / len(top_10), 2) if top_10 else 0
+            # 구간별 calibration (예측 확률 버킷별 실제 익절률)
+            buckets = {}
+            for lo in [0.0, 0.3, 0.4, 0.5, 0.6]:
+                hi = lo + 0.1 if lo >= 0.3 else 0.3
+                grp = [d for d in details if lo <= d['ml_prob'] < hi]
+                if grp:
+                    buckets[f"{lo:.1f}-{hi:.1f}"] = {
+                        "n": len(grp),
+                        "pred_avg": round(sum(d['ml_prob'] for d in grp) / len(grp), 3),
+                        "actual_win_rate": round(sum(d['actual_win'] for d in grp) / len(grp), 3),
+                    }
+
+            # 매수기준(0.42) 이상 = 실제로 봇이 샀을 코인들의 익절률 (가장 중요)
+            above = [d for d in details if d['ml_prob'] >= self.EVAL_BUY_THRESHOLD]
+            above_win_rate = round(sum(d['actual_win'] for d in above) / len(above), 3) if above else None
+
+            # 상위 10개(예측 높은 순) 실제 익절률
+            top10 = sorted(details, key=lambda x: x['ml_prob'], reverse=True)[:10]
+            top10_win_rate = round(sum(d['actual_win'] for d in top10) / len(top10), 3) if top10 else 0
 
             entry = {
                 "date": yesterday,
-                "total_evaluated": total,
-                "correct": correct,
-                "accuracy_pct": accuracy,
-                "top10_accuracy_pct": round(top_10_correct / len(top_10) * 100, 1) if top_10 else 0,
-                "top10_avg_change_pct": top_10_avg_change,
-                "top10_details": top_10,
+                "model": "minute5-v3",
+                "n_evaluated": n,
+                "predicted_avg_winrate": round(predicted_avg, 3),
+                "actual_winrate": round(actual_win_rate, 3),
+                "calibration_error_pp": round(calib_error, 1),  # +과대 / -과소
+                "above_threshold_n": len(above),
+                "above_threshold_winrate": above_win_rate,
+                "top10_winrate": top10_win_rate,
+                "buckets": buckets,
             }
-
             accuracy_log.append(entry)
             with open(accuracy_file, 'w', encoding='utf-8') as f:
                 json.dump(accuracy_log, f, ensure_ascii=False, indent=2)
 
-            print(f">>> 📊 [ML Accuracy] {yesterday}: {accuracy}% ({correct}/{total})")
-            print(f">>>    Top10 정확도: {entry['top10_accuracy_pct']}%, 평균 변동: {top_10_avg_change}%")
+            print(f">>> 📊 [ML Eval] {yesterday}: 예측 {predicted_avg*100:.1f}% vs 실제 {actual_win_rate*100:.1f}% "
+                  f"(calib {calib_error:+.1f}%p, n={n})")
+            print(f">>>    매수기준↑ {len(above)}개 실제익절 {(above_win_rate or 0)*100:.0f}% / Top10 {top10_win_rate*100:.0f}%")
+
+            # Discord 일일 평가 알림
+            try:
+                from app.services import notifier
+                asyncio.create_task(notifier.notify_ml_eval_daily(entry))
+            except Exception as e:
+                print(f">>> ⚠️ [ML Eval alert] {e}")
+
+            return entry
 
         except Exception as e:
-            print(f">>> ⚠️ [ML Accuracy Error] {e}")
+            print(f">>> ⚠️ [ML Eval Error] {e}")
+            return None
+
+    async def _weekly_model_review(self):
+        """[분봉 모델 v3] 7일마다 누적 평가를 집계해 모델 수정 방향 진단 + Discord 알림."""
+        try:
+            accuracy_file = os.path.join(CACHE_DIR, "ml_accuracy_log.json")
+            review_file = os.path.join(CACHE_DIR, "ml_weekly_review.json")
+            if not os.path.exists(accuracy_file):
+                return
+            with open(accuracy_file, encoding='utf-8') as f:
+                log = json.load(f)
+
+            # minute5-v3 평가만 (옛 일봉 평가 제외)
+            recent = [e for e in log if e.get('model') == 'minute5-v3'][-7:]
+            if len(recent) < 3:
+                return  # 최소 3일치 누적돼야 점검 의미
+
+            # 마지막 점검 후 7일 경과했는지 (중복 방지)
+            last_review_date = None
+            if os.path.exists(review_file):
+                try:
+                    with open(review_file, encoding='utf-8') as f:
+                        prev = json.load(f)
+                    last_review_date = prev[-1]['date'] if prev else None
+                except Exception:
+                    prev = []
+            else:
+                prev = []
+            today = datetime.now(KST).strftime('%Y-%m-%d')
+            if last_review_date:
+                gap = (datetime.strptime(today, '%Y-%m-%d') - datetime.strptime(last_review_date, '%Y-%m-%d')).days
+                if gap < 7:
+                    return
+
+            # 집계
+            n_days = len(recent)
+            avg_pred = sum(e['predicted_avg_winrate'] for e in recent) / n_days
+            avg_actual = sum(e['actual_winrate'] for e in recent) / n_days
+            avg_calib = sum(e['calibration_error_pp'] for e in recent) / n_days
+            above_rates = [e['above_threshold_winrate'] for e in recent if e.get('above_threshold_winrate') is not None]
+            avg_above = sum(above_rates) / len(above_rates) if above_rates else None
+
+            # 진단 + 권장 방향
+            recs = []
+            if avg_calib > 8:
+                recs.append("⚠️ 과대평가 경향(+8%p↑) → calibration 재학습 또는 임계값 상향 권장")
+            elif avg_calib < -8:
+                recs.append("⚠️ 과소평가 경향(-8%p↓) → 좋은 진입을 놓치는 중, 임계값 하향 검토")
+            else:
+                recs.append("✅ calibration 양호 (±8%p 이내)")
+
+            breakeven = 0.364
+            if avg_above is not None:
+                if avg_above < breakeven:
+                    recs.append(f"🔴 매수기준↑ 실제익절률 {avg_above*100:.0f}% < 손익분기 36% → 임계값 상향(0.42→0.47) 또는 피처 보강 필요")
+                elif avg_above < breakeven + 0.05:
+                    recs.append(f"🟡 매수기준↑ 익절률 {avg_above*100:.0f}% 손익분기 근접 → 마진 부족, 주시")
+                else:
+                    recs.append(f"🟢 매수기준↑ 익절률 {avg_above*100:.0f}% — 기대수익 + 영역")
+
+            # 구간 신뢰도 (예측 높은데 실제 낮은 구간 탐지)
+            bucket_warn = []
+            for e in recent:
+                for k, v in (e.get('buckets') or {}).items():
+                    if v['n'] >= 3 and v['pred_avg'] - v['actual_win_rate'] > 0.20:
+                        bucket_warn.append(k)
+            if bucket_warn:
+                from collections import Counter
+                common = Counter(bucket_warn).most_common(1)[0]
+                if common[1] >= 2:
+                    recs.append(f"📊 {common[0]} 구간이 반복적으로 과대평가됨 → 해당 확률대 신뢰 주의")
+
+            review = {
+                "date": today,
+                "days_covered": n_days,
+                "avg_predicted_winrate": round(avg_pred, 3),
+                "avg_actual_winrate": round(avg_actual, 3),
+                "avg_calibration_error_pp": round(avg_calib, 1),
+                "avg_above_threshold_winrate": round(avg_above, 3) if avg_above is not None else None,
+                "recommendations": recs,
+            }
+            prev.append(review)
+            with open(review_file, 'w', encoding='utf-8') as f:
+                json.dump(prev[-20:], f, ensure_ascii=False, indent=2)
+
+            print(f">>> 📅 [주간점검] {n_days}일 — 예측 {avg_pred*100:.1f}% vs 실제 {avg_actual*100:.1f}% (calib {avg_calib:+.1f}%p)")
+            for r in recs:
+                print(f">>>    {r}")
+
+            try:
+                from app.services import notifier
+                asyncio.create_task(notifier.notify_ml_eval_weekly(review))
+            except Exception as e:
+                print(f">>> ⚠️ [주간점검 alert] {e}")
+
+        except Exception as e:
+            print(f">>> ⚠️ [Weekly Review Error] {e}")
 
     def _save_report_txt(self):
         try:
