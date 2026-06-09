@@ -586,8 +586,9 @@ class TradeManager:
 
             # ═══ [개선 4] 최소 보유 시간: 30분 미만이면 점수하락/이상징후 매도 차단 ═══
             if reason in ("score_drop", "anomaly") and holding_hours < (self.MIN_HOLD_MINUTES / 60):
+                _held_reason = reason  # 비우기 전에 캡처 (로그용)
                 reason = ""  # 매도 취소 — 아직 보유 시간 부족
-                log.info(f"[홀딩] {ticker}: {reason}이나 보유 {holding_hours*60:.0f}분 < {self.MIN_HOLD_MINUTES}분 → 매도 보류")
+                log.info(f"[홀딩] {ticker}: {_held_reason}이나 보유 {holding_hours*60:.0f}분 < {self.MIN_HOLD_MINUTES}분 → 매도 보류")
 
             # --- [매도 실행] ---
             if reason and self.is_active:
@@ -939,7 +940,8 @@ class TradeManager:
         
         # --- [3] 점수 가중 예산 배분 + 매수 실행 ---
         if candidates and can_buy:
-            candidates.sort(key=lambda x: (x.get('ml_prob', 0.5), x['score']), reverse=True)
+            # ml_prob 키가 있어도 값이 None일 수 있음(ML 미학습 시) → None과 float 정렬 TypeError 방지
+            candidates.sort(key=lambda x: (x.get('ml_prob') or 0.5, x['score']), reverse=True)
             final_picks = candidates[:empty_slots]
 
             total_score = sum(p['score'] for p in final_picks)
