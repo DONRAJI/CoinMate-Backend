@@ -1343,7 +1343,7 @@ class TradeManager:
                 active_reasons.append(f"❄️쿨타임({int(remaining/60)}분)")
 
         if ticker in self.market_status:
-            self.market_status[ticker].update({
+            payload = {
                 "price": price,
                 "score": result['score'],
                 "reasons": active_reasons,
@@ -1356,10 +1356,14 @@ class TradeManager:
                 "score_breakdown": result.get('score_breakdown', []),
                 "regime": result.get('regime', 'normal'),
                 "adx": result.get('adx', 0),
-                "ml_prob": result.get('ml_prob', None),
-                "ml_top_reasons": result.get('ml_top_reasons', []),
                 "skip_reason": None,
-            })
+            }
+            # 🔥 ml_prob/ml_top_reasons는 result에 값이 있을 때만 갱신 — 값이 없는 경로
+            # (process_selling, 매수차단 조기 return 등)가 직전 캐시값을 None으로 덮어쓰는 것 방지
+            if result.get('ml_prob') is not None:
+                payload["ml_prob"] = result['ml_prob']
+                payload["ml_top_reasons"] = result.get('ml_top_reasons', [])
+            self.market_status[ticker].update(payload)
             
     def _set_skip_reason(self, ticker, reason):
         """점수는 통과했지만 필터에 걸린 이유를 market_status에 기록"""
