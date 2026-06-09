@@ -92,6 +92,37 @@ async def notify_sell(ticker: str, price: float, profit: float, reason: str):
     )
 
 
+async def notify_shadow_buy(ticker: str, price: float, budget: float, strategy: str):
+    """[섀도우] 가상 매수 알림 — 실거래와 구분(보라색 🧪)."""
+    await _send_embed(
+        title=f"🧪 [가상] 매수 · {ticker}",
+        description="섀도우 모드 가상거래 (실제 주문 아님)",
+        color=COLORS["purple"],
+        fields=[
+            {"name": "가상 체결가", "value": f"{price:,.0f}원"},
+            {"name": "가상 투입", "value": f"{budget:,.0f}원"},
+            {"name": "전략", "value": strategy, "inline": False},
+        ],
+        footer="SHADOW MODE · 위험 없는 가상거래 검증",
+    )
+
+
+async def notify_shadow_sell(ticker: str, price: float, profit: float, reason: str):
+    """[섀도우] 가상 매도 알림."""
+    sign = "+" if profit >= 0 else ""
+    await _send_embed(
+        title=f"🧪 [가상] 매도 · {ticker} ({sign}{profit:.2f}%)",
+        description="섀도우 모드 가상거래 (실제 주문 아님)",
+        color=COLORS["purple"],
+        fields=[
+            {"name": "가상 체결가", "value": f"{price:,.0f}원"},
+            {"name": "수익률", "value": f"{sign}{profit:.2f}%"},
+            {"name": "사유", "value": reason, "inline": False},
+        ],
+        footer="SHADOW MODE · 위험 없는 가상거래 검증",
+    )
+
+
 async def notify_error(source: str, error: str):
     await _send_embed(
         title=f"🚨 오류 · {source}",

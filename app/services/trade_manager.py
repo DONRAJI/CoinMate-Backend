@@ -429,6 +429,7 @@ class TradeManager:
                 if loop_count % 300 == 0:
                     await self.update_target_coins()
                     await self.refresh_target_scores()
+                    await self.refresh_ml_top_probs()
                     self.cleanup_old_cache()
                 
                 now = datetime.now(KST)
@@ -588,7 +589,9 @@ class TradeManager:
                 if success:
                     self.sell_timestamps[ticker] = time.time()
                     self.high_watermarks.pop(ticker, None)
-                    if not self.SHADOW_MODE:
+                    if self.SHADOW_MODE:
+                        asyncio.create_task(notifier.notify_shadow_sell(ticker, current, profit_rate, reason))
+                    else:
                         asyncio.create_task(notifier.notify_sell(ticker, current, profit_rate, reason))
 
                     if ticker in self.market_status:
@@ -993,7 +996,9 @@ class TradeManager:
                     success = await self.executor.try_buy(ticker, price, budget, strategy_name, buy_context)
                 if success:
                     available_krw -= budget
-                    if not self.SHADOW_MODE:
+                    if self.SHADOW_MODE:
+                        asyncio.create_task(notifier.notify_shadow_buy(ticker, price, budget, strategy_name))
+                    else:
                         asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
                         if ticker in self.market_status:
                             self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
@@ -1318,6 +1323,38 @@ class TradeManager:
                 pass
         if refreshed > 0:
             print(f">>> 🔄 [Refresh] 타겟 {refreshed}개 종목 점수 갱신 완료")
+
+    async def refresh_ml_top_probs(self):
+        """[분봉 모델] ML Top 후보(비-타겟) 코인의 익절확률을 실시간 minute5로 재계산.
+        ML Top 표시값은 results_cache(일일 스캔 자정값)에서 오는데, 모달은 클릭 시 실시간 계산 →
+        값 불일치 발생. 여기서 Top 후보를 ≤5분 주기로 재계산해 모달값과 근접하게 맞춤(카드와 동일 기준).
+        """
+        if not self.ml.is_trained:
+            return
+        targets = set(self.target_coins)
+        # 일일 스캔값 기준 익절확률 상위 후보(타겟 제외, Top10+여유) 선별
+        cands = [
+            c['ticker'] for c in self.backtester.results_cache.values()
+            if c.get('ml_prob') is not None and c['ml_prob'] >= 0.30 and c['ticker'] not in targets
+        ]
+        cands = sorted(
+            cands, key=lambda t: self.backtester.results_cache[t].get('ml_prob', 0), reverse=True
+        )[:15]
+        refreshed = 0
+        for ticker in cands:
+            try:
+                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=200)
+                await asyncio.sleep(0.1)
+                if df_5m is None or len(df_5m) < 60:
+                    continue
+                ml_result = self.ml.predict_with_reasons(df_5m)
+                if ticker in self.backtester.results_cache:
+                    self.backtester.results_cache[ticker]['ml_prob'] = ml_result['prob']
+                refreshed += 1
+            except Exception:
+                pass
+        if refreshed > 0:
+            print(f">>> 🔄 [ML Top Refresh] {refreshed}개 코인 익절확률 실시간 갱신")
 
     def cleanup_old_cache(self):
         active_tickers = set(self.target_coins)
