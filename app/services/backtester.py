@@ -425,13 +425,19 @@ class Backtester:
         )
         return [c['ticker'] for c in sorted_cands[:top_n]]
 
-    def get_ml_top_coins(self, top_n=10):
+    def get_ml_top_coins(self, top_n=10, vol_map=None, min_vol=0):
         """[분봉 모델 v3] 익절 확률 상위 코인 Top N.
         손익분기 36.4%(익절+3.5%/손절-2%) 이상만 표시 — 기대수익 + 인 코인.
+        vol_map/min_vol 제공 시 거래대금 필터 적용 (잡코인 제외 — 실제 매수 후보와 일치).
         """
-        candidates = [
-            c for c in self.results_cache.values()
-            if c.get('ml_prob') is not None and c['ml_prob'] >= 0.364
-        ]
+        candidates = []
+        for c in self.results_cache.values():
+            if c.get('ml_prob') is None or c['ml_prob'] < 0.364:
+                continue
+            # 거래대금 필터 (실제 매수 가능한 유동성 종목만)
+            if vol_map is not None and min_vol > 0:
+                if vol_map.get(c['ticker'], 0) < min_vol:
+                    continue
+            candidates.append(c)
         sorted_cands = sorted(candidates, key=lambda x: x['ml_prob'], reverse=True)
         return sorted_cands[:top_n]

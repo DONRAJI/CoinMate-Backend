@@ -26,7 +26,10 @@ class TradeManager:
         self.strategy = Strategy()
         self.backtester = Backtester()
         self.ml = MLPredictor()
-        self.ML_MIN_PROB = 0.55  # ML 최소 상승 확률
+        # [분봉 모델 v3] ML_MIN_PROB = 익절 확률 하한.
+        # 손익분기 36.4%(익절+3.5%/손절-2%) + 수수료/마진 고려 → 0.42 (after-fee +EV)
+        # 이전 0.55는 옛 일봉 모델("1%상승확률") 기준이라 분봉 모델에선 전부 차단됐음
+        self.ML_MIN_PROB = 0.42
         
         self.is_active = False
         self.shared_data = {}
@@ -73,12 +76,14 @@ class TradeManager:
         self.NEUTRAL_SCORE_BONUS = 1.0
         self.NEUTRAL_ML_BONUS = 0.05
         self.NEUTRAL_SCORE_FLOOR = 6.5
-        self.NEUTRAL_ML_FLOOR = 0.60
+        # [분봉 모델 v3] neutral 시 익절확률 하한 상향 (손익분기 + 더 큰 마진)
+        self.NEUTRAL_ML_FLOOR = 0.47
 
-        # ═══ [개선 9] 적응형 ML 임계값 (분포 시프트 자동 대응) ═══
-        # ML 확률 분포가 시간에 따라 우로 시프트(예: 평균 0.44→0.52)하면
-        # 고정 임계값 0.55가 점점 헐거워짐 → 그 날 상위 N%만 통과시키는 percentile 임계값과 max()
-        self.ADAPTIVE_ML_PERCENTILE = 85  # 상위 15% (≈ percentile 85)
+        # ═══ [개선 9] 적응형 ML 임계값 (강세장 선별 강화용) ═══
+        # 분봉 모델은 calibrated(익절확률 = 실제 승률)라 base(0.42)가 절대 기준.
+        # adaptive는 max()로만 동작 → 강세장에 +EV 코인이 많으면 상위 15%만 통과(더 선별적),
+        # 약세장엔 base 0.42 floor 유지(절대 아래로 안 내려감).
+        self.ADAPTIVE_ML_PERCENTILE = 85  # 상위 15%
         self.ADAPTIVE_ML_MIN_SAMPLE = 30  # 표본 30개 미만이면 적응형 비활성
 
         # ═══ [개선 4] 최소 보유 시간 ═══
@@ -779,14 +784,18 @@ class TradeManager:
                         self._set_skip_reason(ticker, f"📈 고점 근접 ({high_ratio:.1%})")
                         continue
 
-            # ML 예측 (v2: 낮은 확률이면 차단, 레짐별 임계값 적용)
-            ml_prob = res.get('ml_prob') or 0.5
-            if self.ml.is_trained:
-                print(f"  🤖 [ML] {ticker}: 상승확률 {ml_prob:.1%} (기준 {local_ml_min:.0%}, 레짐 {regime})")
+            # [분봉 모델 v3] ML 익절확률 필터 (손익분기 기반 임계값, 레짐별 적용)
+            ml_prob = res.get('ml_prob')
+            if self.ml.is_trained and ml_prob is not None:
+                print(f"  🤖 [ML] {ticker}: 익절확률 {ml_prob:.1%} (기준 {local_ml_min:.0%}, 레짐 {regime})")
                 if ml_prob < local_ml_min:
-                    print(f"  🚫 [Skip] {ticker}: ML 확률 낮음 ({ml_prob:.1%} < {local_ml_min:.0%}) [레짐: {regime}]")
-                    self._set_skip_reason(ticker, f"🤖 ML 확률 낮음 ({ml_prob:.0%}) [{regime}]")
+                    print(f"  🚫 [Skip] {ticker}: 익절확률 낮음 ({ml_prob:.1%} < {local_ml_min:.0%}) [레짐: {regime}]")
+                    self._set_skip_reason(ticker, f"🤖 익절확률 낮음 ({ml_prob:.0%}) [{regime}]")
                     continue
+            elif self.ml.is_trained and ml_prob is None:
+                # minute5 데이터 없어 ML 판단 불가 → 보수적으로 차단
+                self._set_skip_reason(ticker, "🤖 ML 데이터 대기중")
+                continue
 
             last_open = df_min['open'].iloc[-1]
             last_close = df_min['close'].iloc[-1]
@@ -1330,9 +1339,14 @@ class TradeManager:
             items_list.append(item)
 
         # ML Top 코인 (일일 스캔 기반, 프론트 전용)
+        # [A] 거래대금 10억 이상만 (잡코인 제외 — 매수 AI 기준과 동일, "보이는 것=살 수 있는 것")
         ml_top_coins = []
         try:
-            raw_ml_top = self.backtester.get_ml_top_coins(top_n=10)
+            vol_map = {}
+            if self.shared_data:
+                snap = self._snapshot_shared_data()
+                vol_map = {t: d.get('acc_trade_price_24h', 0) for t, d in snap.items()}
+            raw_ml_top = self.backtester.get_ml_top_coins(top_n=10, vol_map=vol_map, min_vol=1_000_000_000)
             existing_tickers = {item['ticker'] for item in items_list}
             for c in raw_ml_top:
                 ticker = c['ticker']
