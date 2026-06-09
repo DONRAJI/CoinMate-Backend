@@ -221,6 +221,20 @@ class Backtester:
             top10 = sorted(details, key=lambda x: x['ml_prob'], reverse=True)[:10]
             top10_win_rate = round(sum(d['actual_win'] for d in top10) / len(top10), 3) if top10 else 0
 
+            # 🔥 그날 매수 게이트(score+ML) 통과 후보 수 — 현행 vs 완화 비교 (거래 빈도 진단)
+            # 일일 스캔 1회 스냅샷 기준 추정치(레짐/심야/쿨오프/슬롯 미적용 = 빈도 상한)
+            def _gate_count(score_min, ml_min):
+                return sum(
+                    1 for d in yesterday_data.values()
+                    if isinstance(d, dict) and d.get('ml_prob') is not None
+                    and d.get('score', 0) >= score_min and d['ml_prob'] >= ml_min
+                )
+            buy_opportunities = {
+                "current_bull": _gate_count(5.5, 0.42),      # 현행 bull 기준
+                "current_neutral": _gate_count(6.5, 0.47),   # 현행 neutral 기준
+                "breakeven_relaxed": _gate_count(5.0, 0.364),  # 완화안(손익분기)
+            }
+
             entry = {
                 "date": yesterday,
                 "model": "minute5-v3",
@@ -231,6 +245,7 @@ class Backtester:
                 "above_threshold_n": len(above),
                 "above_threshold_winrate": above_win_rate,
                 "top10_winrate": top10_win_rate,
+                "buy_opportunities": buy_opportunities,
                 "buckets": buckets,
             }
             accuracy_log.append(entry)
@@ -240,6 +255,7 @@ class Backtester:
             print(f">>> 📊 [ML Eval] {yesterday}: 예측 {predicted_avg*100:.1f}% vs 실제 {actual_win_rate*100:.1f}% "
                   f"(calib {calib_error:+.1f}%p, n={n})")
             print(f">>>    매수기준↑ {len(above)}개 실제익절 {(above_win_rate or 0)*100:.0f}% / Top10 {top10_win_rate*100:.0f}%")
+            print(f">>>    매수후보(게이트통과): 현행bull {buy_opportunities['current_bull']} / 현행neutral {buy_opportunities['current_neutral']} / 완화 {buy_opportunities['breakeven_relaxed']}")
 
             # Discord 일일 평가 알림
             try:

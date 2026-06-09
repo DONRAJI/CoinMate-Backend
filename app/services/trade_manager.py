@@ -107,6 +107,11 @@ class TradeManager:
         from app.core.paper_repository import paper_repository
         self.paper_repo = paper_repository
         self.SHADOW_MODE = False  # ControlPanel/config로 토글
+        # 섀도우 완화안(손익분기 기준) — 라이브 영향 0, SHADOW_MODE일 때만 적용
+        # 목적: "기준 완화 시 거래 빈도·수익성"을 위험 없이 검증
+        self.SHADOW_ML_MIN_PROB = 0.364       # 손익분기 익절확률 (익절+3.5%/손절-2%)
+        self.SHADOW_BUY_THRESHOLD = 5.0       # 완화 점수 기준
+        self.SHADOW_ALLOW_ALL_REGIMES = True  # bear/neutral 포함 전 레짐 매수(게이트는 적용)
 
         # 설정값
         self.MAX_COIN_COUNT = 5
@@ -718,31 +723,41 @@ class TradeManager:
             return
 
         # ═══ [개선 6] 시장 전체 추세(BTC) 필터 — 하락장이면 전체 매수 차단 ═══
+        # 섀도우 완화 검증 모드는 bear도 매수 허용(게이트는 적용) → 약세장 거래 데이터 수집
         regime = self._get_market_regime()
-        if regime == "bear":
+        shadow_relax = self.SHADOW_MODE
+        if regime == "bear" and not (shadow_relax and self.SHADOW_ALLOW_ALL_REGIMES):
             if time.time() - self._last_bear_log > 600:  # 10분마다 로그
                 print(f"  🐻 [Market] BTC 하락장 감지 → 신규 매수 전면 차단")
                 self._last_bear_log = time.time()
             return
 
-        # ═══ [개선 7] 레짐별 매수 임계값 계산 (neutral은 더 엄격) ═══
-        base_score = self.strategy.BUY_THRESHOLD
-        base_ml = self.ML_MIN_PROB
-        if regime == "neutral":
-            local_buy_threshold = max(base_score + self.NEUTRAL_SCORE_BONUS, self.NEUTRAL_SCORE_FLOOR)
-            local_ml_min = max(base_ml + self.NEUTRAL_ML_BONUS, self.NEUTRAL_ML_FLOOR)
+        if shadow_relax:
+            # ═══ [섀도우 완화안] 손익분기 기준 — adaptive/neutral 가산 미적용 (순수 완화 게이트 검증) ═══
+            local_buy_threshold = self.SHADOW_BUY_THRESHOLD
+            local_ml_min = self.SHADOW_ML_MIN_PROB
             if time.time() - self._last_neutral_log > 600:
-                print(f"  ⚖️ [Market] BTC neutral → 엄격 진입 (score≥{local_buy_threshold}, ML≥{local_ml_min:.0%})")
+                print(f"  🧪 [Shadow] 완화 진입 (score≥{local_buy_threshold}, ML≥{local_ml_min:.0%}, regime={regime})")
                 self._last_neutral_log = time.time()
-        else:  # bull
-            local_buy_threshold = base_score
-            local_ml_min = base_ml
+        else:
+            # ═══ [개선 7] 레짐별 매수 임계값 계산 (neutral은 더 엄격) ═══
+            base_score = self.strategy.BUY_THRESHOLD
+            base_ml = self.ML_MIN_PROB
+            if regime == "neutral":
+                local_buy_threshold = max(base_score + self.NEUTRAL_SCORE_BONUS, self.NEUTRAL_SCORE_FLOOR)
+                local_ml_min = max(base_ml + self.NEUTRAL_ML_BONUS, self.NEUTRAL_ML_FLOOR)
+                if time.time() - self._last_neutral_log > 600:
+                    print(f"  ⚖️ [Market] BTC neutral → 엄격 진입 (score≥{local_buy_threshold}, ML≥{local_ml_min:.0%})")
+                    self._last_neutral_log = time.time()
+            else:  # bull
+                local_buy_threshold = base_score
+                local_ml_min = base_ml
 
-        # ═══ [개선 9] 적응형 ML 임계값 (분포 시프트 자동 대응) ═══
-        adaptive_ml_min = self._get_adaptive_ml_min(local_ml_min)
-        if adaptive_ml_min > local_ml_min:
-            print(f"  📊 [Adaptive ML] 분포 상위 {100 - self.ADAPTIVE_ML_PERCENTILE}% 기준 → ML≥{adaptive_ml_min:.0%} (regime base {local_ml_min:.0%})")
-            local_ml_min = adaptive_ml_min
+            # ═══ [개선 9] 적응형 ML 임계값 (분포 시프트 자동 대응) ═══
+            adaptive_ml_min = self._get_adaptive_ml_min(local_ml_min)
+            if adaptive_ml_min > local_ml_min:
+                print(f"  📊 [Adaptive ML] 분포 상위 {100 - self.ADAPTIVE_ML_PERCENTILE}% 기준 → ML≥{adaptive_ml_min:.0%} (regime base {local_ml_min:.0%})")
+                local_ml_min = adaptive_ml_min
 
         # --- [1] 먼저 예산/슬롯 확인 (섀도우면 가상 잔고/슬롯 기준) ---
         if self.SHADOW_MODE:

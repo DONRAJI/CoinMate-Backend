@@ -180,6 +180,14 @@ async def notify_ml_eval_daily(entry: dict):
         {"name": f"매수기준(42%)↑ {above_n}개", "value": f"실제익절 {(above_wr or 0)*100:.0f}%" if above_wr is not None else "해당없음"},
         {"name": "Top10 실제익절", "value": f"{top10:.0f}%"},
     ]
+
+    bo = entry.get('buy_opportunities')
+    if bo:
+        fields.append({
+            "name": "매수후보 수 (게이트 통과)",
+            "value": f"현행bull {bo.get('current_bull', 0)} / neutral {bo.get('current_neutral', 0)} / 완화 {bo.get('breakeven_relaxed', 0)}",
+            "inline": False,
+        })
     await _send_embed(
         title=f"📊 분봉 모델 일일 평가 · {entry.get('date', '')}",
         description='"예측한 익절확률대로 실제 익절/손절했는지" 검증',
