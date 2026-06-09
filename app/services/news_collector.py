@@ -179,9 +179,9 @@ class NewsCollector:
             "errors": 0,
             "sources": [],
         }
-        # [Phase 1B] ticker별 sentiment summary 캐시 (1분)
-        self._summary_cache: dict[str, dict] = {}
-        self._summary_cache_ts = 0
+        # [Phase 1B] ticker별 sentiment summary 캐시 (1분) — hours별로 분리 보관
+        self._summary_cache: dict[int, dict] = {}   # hours -> result dict
+        self._summary_cache_ts: dict[int, float] = {}  # hours -> 마지막 계산 시각
         self.SUMMARY_CACHE_TTL = 60
         # [Phase 1C] critical 알림 중복 방지 — 보낸 external_id 추적 (최근 200개)
         self._alerted_critical_ids: set[str] = set()
@@ -190,8 +190,8 @@ class NewsCollector:
         """모든 ticker의 N시간 sentiment 집계 (1회 SQL + 1분 캐시).
         반환: {symbol: {count, avg_sentiment, critical_count}}
         """
-        if time.time() - self._summary_cache_ts < self.SUMMARY_CACHE_TTL:
-            return self._summary_cache
+        if time.time() - self._summary_cache_ts.get(hours, 0) < self.SUMMARY_CACHE_TTL:
+            return self._summary_cache.get(hours, {})
         try:
             with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
                 rows = conn.execute(
@@ -228,12 +228,12 @@ class NewsCollector:
                 }
                 for t, d in agg.items()
             }
-            self._summary_cache = result
-            self._summary_cache_ts = time.time()
+            self._summary_cache[hours] = result
+            self._summary_cache_ts[hours] = time.time()
             return result
         except Exception as e:
             print(f"⚠️ [News summary] {e}")
-            return self._summary_cache  # stale fallback
+            return self._summary_cache.get(hours, {})  # stale fallback
 
     def get_ticker_summary(self, ticker: str, hours: int = 24) -> dict:
         """단일 ticker (KRW-BTC 또는 BTC)의 sentiment summary"""

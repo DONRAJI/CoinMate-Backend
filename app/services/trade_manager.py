@@ -119,6 +119,12 @@ class TradeManager:
         self.zombie_strikes = {}          # ticker -> 연속 미발견 횟수
         self.ZOMBIE_CONFIRM_COUNT = 3     # 3회 연속(≈update_target_coins 3주기) 후 청산
 
+        # ═══ [Phase 1B-2] critical 뉴스 매수 veto ═══
+        # 분석 결과(7일 1269건): critical 뉴스 직후 +4h 평균 -0.64%(상승28%) vs 기준 -0.33%(38%)
+        # → 단기 유의하게 나쁨. sentiment 가산은 예측력 0이라 미적용, critical veto만 채택.
+        self.CRITICAL_VETO_ON = True
+        self.CRITICAL_VETO_HOURS = 4      # 직전 4h 내 치명적 뉴스 있으면 신규 매수 스킵
+
         # 설정값
         self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
@@ -972,6 +978,19 @@ class TradeManager:
                         print(f"  🚫 [Skip] {ticker}: 매도벽 우세 (매수/매도 {ob_ratio} < {self.ORDERBOOK_MIN_BID_ASK})")
                         self._set_skip_reason(ticker, f"📊 매도벽 우세 ({ob_ratio})")
                         continue
+
+                # 🔥 [Phase 1B-2] critical 뉴스 veto — 직전 4h 치명적 뉴스 있으면 매수 스킵
+                # (분석 근거: critical 직후 단기 가격이 유의하게 더 나쁨. 최종 후보에만 호출=저빈도)
+                if self.CRITICAL_VETO_ON:
+                    try:
+                        from app.services.news_collector import news_collector as _nc
+                        crit_n = _nc.get_ticker_summary(ticker, hours=self.CRITICAL_VETO_HOURS).get("critical_count", 0)
+                        if crit_n and crit_n > 0:
+                            print(f"  🚫 [Skip] {ticker}: 치명적 뉴스 {crit_n}건 ({self.CRITICAL_VETO_HOURS}h내) → 매수 보류")
+                            self._set_skip_reason(ticker, f"🚨 치명적 뉴스 ({crit_n}건, {self.CRITICAL_VETO_HOURS}h내)")
+                            continue
+                    except Exception as _e:
+                        pass
 
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
