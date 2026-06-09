@@ -95,6 +95,13 @@ class TradeManager:
         self.COIN_LOSS_STREAK_LIMIT = 2   # 같은 코인 2연패 시 블랙리스트
         self.COIN_BLACKLIST_SECONDS = 7200  # 2시간 블랙리스트
 
+        # ═══ [개선 10] 호가창 진입 필터 — 56% 손절(진입 직후 하락) 대응 ═══
+        # 매수 직전 매도벽이 매수벽보다 두꺼우면(매도 압력) 진입 보류
+        # bid/ask 비율 = 상단 N호가 매수잔량(금액) / 매도잔량(금액). 낮을수록 매도 우세
+        self.ORDERBOOK_FILTER_ON = True
+        self.ORDERBOOK_DEPTH = 5          # 상위 5호가로 판단
+        self.ORDERBOOK_MIN_BID_ASK = 0.7  # 매수/매도 비율 0.7 미만이면 차단(매도벽)
+
         # 설정값
         self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
@@ -604,6 +611,30 @@ class TradeManager:
                         self.coin_loss_streak[ticker] = 0  # 승리 시 연패 초기화
 
     # ═══════════════ 적응형 ML 임계값 (분포 기반) ═══════════════
+    # ═══════════════ 호가창 진입 필터 ═══════════════
+    async def _check_orderbook(self, ticker: str) -> tuple[bool, float]:
+        """매수 직전 호가창 점검.
+        Returns: (통과여부, bid_ask_ratio)
+        bid_ask_ratio = 상위 N호가 매수금액 / 매도금액. 1보다 크면 매수우세.
+        """
+        try:
+            ob = await asyncio.to_thread(pyupbit.get_orderbook, ticker)
+            if isinstance(ob, list):
+                ob = ob[0] if ob else None
+            if not ob or 'orderbook_units' not in ob:
+                return True, 1.0  # 조회 실패 시 통과(fail-open)
+
+            units = ob['orderbook_units'][:self.ORDERBOOK_DEPTH]
+            bid_value = sum(u['bid_price'] * u['bid_size'] for u in units)
+            ask_value = sum(u['ask_price'] * u['ask_size'] for u in units)
+            if ask_value <= 0:
+                return True, 1.0
+            ratio = bid_value / ask_value
+            return ratio >= self.ORDERBOOK_MIN_BID_ASK, round(ratio, 2)
+        except Exception as e:
+            print(f"⚠️ [Orderbook] {ticker}: {e}")
+            return True, 1.0  # 에러 시 통과
+
     def _get_adaptive_ml_min(self, base_min: float) -> float:
         """그 날 전 코인의 ml_prob 분포에서 상위 (100 - PERCENTILE)% 기준값과
         regime-based base_min 중 더 큰 값을 반환.
@@ -889,11 +920,21 @@ class TradeManager:
                     print(f"  💸 [Skip] {ticker}: 예산부족({budget:.0f}원 < {self.MIN_ORDER_KRW}원)")
                     continue
 
+                # 🔥 [개선 10] 호가창 진입 필터 — 매수 직전 매도벽 점검
+                # (진입 직후 하락=손절 56% 대응. 최종 후보에만 호출해 API 부하 최소화)
+                ob_ratio = None
+                if self.ORDERBOOK_FILTER_ON:
+                    ob_pass, ob_ratio = await self._check_orderbook(ticker)
+                    if not ob_pass:
+                        print(f"  🚫 [Skip] {ticker}: 매도벽 우세 (매수/매도 {ob_ratio} < {self.ORDERBOOK_MIN_BID_ASK})")
+                        self._set_skip_reason(ticker, f"📊 매도벽 우세 ({ob_ratio})")
+                        continue
+
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
 
                 ml_p = pick.get('ml_prob') or 0.5
-                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / Kelly:{k_frac:.1%} / 예산:{budget:.0f}원) -> 매수")
+                log.info(f"[Pick] {ticker} (점수:{pick['score']} / RSI:{pick['rsi']:.1f} / ML:{ml_p:.0%} / Kelly:{k_frac:.1%} / 호가:{ob_ratio} / 예산:{budget:.0f}원) -> 매수")
 
                 # 🔥 [P1] 매수 시점 컨텍스트 (사후 분석용)
                 buy_context = {
@@ -901,6 +942,7 @@ class TradeManager:
                     "ml_prob": round(float(pick['ml_prob']), 4) if pick.get('ml_prob') is not None else None,
                     "regime": self._market_regime_cache or "neutral",
                     "rsi": round(float(pick.get('rsi', 0)), 1),
+                    "orderbook_ratio": ob_ratio,
                 }
                 # [Phase 1B] 매수 시점 뉴스 컨텍스트 (참고/분석용, 매매에 직접 영향 없음)
                 try:
