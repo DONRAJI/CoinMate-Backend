@@ -102,6 +102,12 @@ class TradeManager:
         self.ORDERBOOK_DEPTH = 5          # 상위 5호가로 판단
         self.ORDERBOOK_MIN_BID_ASK = 0.7  # 매수/매도 비율 0.7 미만이면 차단(매도벽)
 
+        # ═══ [섀도우 모드] 페이퍼 트레이딩 ═══
+        # ON이면 실제 주문 대신 가상 매수/매도로 기록 (위험 없이 전략 검증)
+        from app.core.paper_repository import paper_repository
+        self.paper_repo = paper_repository
+        self.SHADOW_MODE = False  # ControlPanel/config로 토글
+
         # 설정값
         self.MAX_COIN_COUNT = 5
         self.MIN_ORDER_KRW = 6000
@@ -163,6 +169,9 @@ class TradeManager:
         if "buy_threshold" in cfg:
             self.strategy.BUY_THRESHOLD = cfg["buy_threshold"]
             applied.append(f"buy_threshold={cfg['buy_threshold']}")
+        if "shadow_mode" in cfg:
+            self.SHADOW_MODE = bool(cfg["shadow_mode"])
+            applied.append(f"shadow_mode={self.SHADOW_MODE}")
         if applied:
             print(f">>> 🔧 [Config] 영속화된 설정 복원: {', '.join(applied)}")
 
@@ -178,6 +187,7 @@ class TradeManager:
             "min_order_krw": self.MIN_ORDER_KRW,
             "rebuy_cooldown": self.REBUY_COOLDOWN,
             "buy_threshold": self.strategy.BUY_THRESHOLD,
+            "shadow_mode": self.SHADOW_MODE,
         }
         try:
             with open(self._config_path, 'w', encoding='utf-8') as f:
@@ -445,9 +455,10 @@ class TradeManager:
     async def process_selling(self, night_mode=False):
         """
         night_mode=True: 손절만 실행 (야간 보호)
+        섀도우 모드면 가상 포지션을 매도 판단.
         """
-        open_trades = self.repo.get_open_trades()
-        
+        open_trades = self.paper_repo.get_open_trades() if self.SHADOW_MODE else self.repo.get_open_trades()
+
         for trade in open_trades:
             trade_id = trade['id']
             ticker = trade['ticker']
@@ -564,11 +575,16 @@ class TradeManager:
             if reason and self.is_active:
                 sell_reason_full = f"{reason}({reason_detail})" if reason_detail else reason
                 log.info(f"[매도 판단] {ticker} -> {sell_reason_full}")
-                success = await self.executor.try_sell(trade_id, ticker, current, reason)
+                # 🔥 [섀도우 모드] 가상 매도 분기
+                if self.SHADOW_MODE:
+                    success = self.paper_repo.paper_sell(trade_id, current, reason)
+                else:
+                    success = await self.executor.try_sell(trade_id, ticker, current, reason)
                 if success:
                     self.sell_timestamps[ticker] = time.time()
                     self.high_watermarks.pop(ticker, None)
-                    asyncio.create_task(notifier.notify_sell(ticker, current, profit_rate, reason))
+                    if not self.SHADOW_MODE:
+                        asyncio.create_task(notifier.notify_sell(ticker, current, profit_rate, reason))
 
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
@@ -728,11 +744,14 @@ class TradeManager:
             print(f"  📊 [Adaptive ML] 분포 상위 {100 - self.ADAPTIVE_ML_PERCENTILE}% 기준 → ML≥{adaptive_ml_min:.0%} (regime base {local_ml_min:.0%})")
             local_ml_min = adaptive_ml_min
 
-        # --- [1] 먼저 예산/슬롯 확인 ---
-        active_cnt = self.repo.get_trade_count()
+        # --- [1] 먼저 예산/슬롯 확인 (섀도우면 가상 잔고/슬롯 기준) ---
+        if self.SHADOW_MODE:
+            active_cnt = self.paper_repo.get_open_count()
+            krw = self.paper_repo.get_krw_balance()
+        else:
+            active_cnt = self.repo.get_trade_count()
+            krw = self.executor.get_krw_balance()
         empty_slots = self.MAX_COIN_COUNT - active_cnt
-
-        krw = self.executor.get_krw_balance()
         can_buy = (empty_slots > 0) and (krw >= self.MIN_ORDER_KRW)
 
         available_krw = krw * 0.99 if can_buy else 0
@@ -952,12 +971,17 @@ class TradeManager:
                     buy_context["news_critical_count"] = news_sum.get("critical_count", 0)
                 except Exception as _e:
                     pass
-                success = await self.executor.try_buy(ticker, price, budget, strategy_name, buy_context)
+                # 🔥 [섀도우 모드] 가상 매수 분기
+                if self.SHADOW_MODE:
+                    success = self.paper_repo.paper_buy(ticker, price, budget, strategy_name, buy_context)
+                else:
+                    success = await self.executor.try_buy(ticker, price, budget, strategy_name, buy_context)
                 if success:
                     available_krw -= budget
-                    asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
-                    if ticker in self.market_status:
-                        self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
+                    if not self.SHADOW_MODE:
+                        asyncio.create_task(notifier.notify_buy(ticker, price, budget, strategy_name))
+                        if ticker in self.market_status:
+                            self.market_status[ticker]['category'] = self.market_status[ticker].get("category", "") + " (보유중)"
                     await asyncio.sleep(0.2)
 
     async def place_manual_buy(self, ticker, krw_amount):
@@ -1343,6 +1367,8 @@ class TradeManager:
             self.market_status[ticker]["skip_reason"] = reason
 
     def _is_holding(self, ticker):
+        if self.SHADOW_MODE:
+            return self.paper_repo.is_holding(ticker)
         if ticker in self.market_status:
             return "(보유중)" in self.market_status[ticker].get("category", "")
         return False

@@ -54,6 +54,36 @@ def get_strategy_stats():
     """전략 조합별/개별 성분별/레짐별 성과 집계"""
     return {"status": "success", "data": trade_manager.repo.get_strategy_stats()}
 
+# === 섀도우(페이퍼) 모드 ===
+@router.get("/shadow/stats")
+def get_shadow_stats():
+    """섀도우 모드 가상 거래 통계"""
+    data = trade_manager.paper_repo.get_stats()
+    data["shadow_mode"] = trade_manager.SHADOW_MODE
+    return {"status": "success", "data": data}
+
+@router.get("/shadow/history")
+def get_shadow_history(limit: int = 50):
+    """섀도우 가상 거래 내역"""
+    rows = trade_manager.paper_repo.get_closed(limit)
+    return {"status": "success", "data": [dict(r) for r in rows]}
+
+class ShadowToggleRequest(BaseModel):
+    enabled: bool
+
+@router.post("/shadow/toggle", dependencies=[Depends(verify_api_key)])
+def toggle_shadow(req: ShadowToggleRequest):
+    """섀도우 모드 ON/OFF (재시작 후에도 유지되도록 영속화)"""
+    trade_manager.SHADOW_MODE = req.enabled
+    trade_manager.save_persisted_config()
+    return {"status": "success", "shadow_mode": trade_manager.SHADOW_MODE}
+
+@router.post("/shadow/reset", dependencies=[Depends(verify_api_key)])
+def reset_shadow():
+    """섀도우 가상 잔고/거래 초기화"""
+    trade_manager.paper_repo.reset()
+    return {"status": "success", "message": "섀도우 초기화 완료"}
+
 # === 설정 조회/변경 API ===
 @router.get("/config")
 def get_config():

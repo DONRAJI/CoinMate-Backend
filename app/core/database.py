@@ -47,6 +47,31 @@ def init_db():
             cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
             print(f">>> [Migration] trades.{col} 컬럼 추가")
 
+    # 🔥 [섀도우 모드] 페이퍼(가상) 거래 테이블 — 실거래와 동일 스키마, 별도 추적
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT,
+        buy_price REAL,
+        buy_amount REAL,
+        buy_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sell_price REAL,
+        sell_time TIMESTAMP,
+        status TEXT DEFAULT 'open',
+        profit_rate REAL,
+        strategy_name TEXT,
+        sell_reason TEXT,
+        buy_score REAL,
+        buy_ml_prob REAL,
+        buy_regime TEXT,
+        buy_rsi REAL,
+        buy_news_sentiment REAL,
+        buy_news_critical_count INTEGER,
+        buy_orderbook_ratio REAL
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status)')
+
     # 2. 분봉 데이터 저장 테이블
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS candles (
