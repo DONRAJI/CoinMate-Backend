@@ -237,7 +237,7 @@ class Backtester:
 
             entry = {
                 "date": yesterday,
-                "model": "minute5-v3",
+                "model": "minute5-v4",
                 "n_evaluated": n,
                 "predicted_avg_winrate": round(predicted_avg, 3),
                 "actual_winrate": round(actual_win_rate, 3),
@@ -280,8 +280,8 @@ class Backtester:
             with open(accuracy_file, encoding='utf-8') as f:
                 log = json.load(f)
 
-            # minute5-v3 평가만 (옛 일봉 평가 제외)
-            recent = [e for e in log if e.get('model') == 'minute5-v3'][-7:]
+            # minute5-v4 평가만 (v3·옛 일봉 평가 제외 — 모델 버전 섞임 방지)
+            recent = [e for e in log if e.get('model') == 'minute5-v4'][-7:]
             if len(recent) < 3:
                 return  # 최소 3일치 누적돼야 점검 의미
 
