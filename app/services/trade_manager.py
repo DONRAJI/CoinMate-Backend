@@ -43,7 +43,9 @@ class TradeManager:
         # 캐시 및 쿨타임
         self.cached_day_dfs = {}
         self.cached_min_dfs = {}
-        self.cached_5m_dfs = {}   # [분봉 모델 v3] ML 추론용 minute5 캐시
+        self.cached_5m_dfs = {}   # [분봉 모델] ML 추론용 minute5 캐시
+        self._btc_5m_cache = None  # [v4] 시장맥락 피처용 BTC minute5 (5분 캐시)
+        self._btc_5m_ts = 0
         self.last_api_call_time = {}
         self.sell_timestamps = {}
 
@@ -805,8 +807,8 @@ class TradeManager:
             # ML 예측 + 근거 (UI 표시용 — 모든 종목)
             # [분봉 모델 v3] minute5 데이터로 예측 (일봉 df_day 아님)
             df_5m = self.cached_5m_dfs.get(ticker)
-            if self.ml.is_trained and df_5m is not None and len(df_5m) >= 60:
-                ml_result = self.ml.predict_with_reasons(df_5m)
+            if self.ml.is_trained and df_5m is not None and len(df_5m) >= 300:
+                ml_result = self.ml.predict_with_reasons(df_5m, self.get_btc_5m())
                 res['ml_prob'] = ml_result['prob']
                 # 카드에 표시할 상위 3개 근거 (라벨만)
                 res['ml_top_reasons'] = [
@@ -1272,6 +1274,20 @@ class TradeManager:
             
         except Exception as e: print(f"Target Update Error: {e}")
 
+    def get_btc_5m(self):
+        """[v4] BTC minute5 (시장맥락 피처용) — 5분 캐시. 실패 시 직전 캐시 fallback."""
+        now = time.time()
+        if self._btc_5m_cache is not None and now - self._btc_5m_ts < 300:
+            return self._btc_5m_cache
+        try:
+            df = pyupbit.get_ohlcv("KRW-BTC", interval="minute5", count=360)
+            if df is not None and len(df) >= 300:
+                self._btc_5m_cache = df
+                self._btc_5m_ts = now
+        except Exception as e:
+            print(f"⚠️ [BTC 5m] 조회 실패, 직전 캐시 사용: {e}")
+        return self._btc_5m_cache
+
     async def get_smart_candles(self, ticker):
         now = time.time()
         last_call = self.last_api_call_time.get(ticker, 0)
@@ -1281,8 +1297,8 @@ class TradeManager:
             try:
                 df_day = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="day", count=60)
                 df_min = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute60", count=60)
-                # [분봉 모델 v3] ML 추론용 minute5 (ma_60 위해 최소 60봉, 여유 200봉)
-                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=200)
+                # [분봉 모델 v4] ML 추론용 minute5 (288봉 롤링 워밍업 → 360봉)
+                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=360)
                 if df_day is not None:
                     self.cached_day_dfs[ticker] = df_day
                     self.cached_min_dfs[ticker] = df_min if df_min is not None else df_day
@@ -1329,8 +1345,8 @@ class TradeManager:
 
                 # [분봉 모델 v3] ML 예측 (minute5) — 매수루프가 조기 return해도 카드에 항상 표시
                 df_5m = self.cached_5m_dfs.get(ticker)
-                if self.ml.is_trained and df_5m is not None and len(df_5m) >= 60:
-                    ml_result = self.ml.predict_with_reasons(df_5m)
+                if self.ml.is_trained and df_5m is not None and len(df_5m) >= 300:
+                    ml_result = self.ml.predict_with_reasons(df_5m, self.get_btc_5m())
                     res['ml_prob'] = ml_result['prob']
                     res['ml_top_reasons'] = [
                         {"label": r["label"], "direction": r["direction"], "value": r["value"]}
@@ -1386,11 +1402,11 @@ class TradeManager:
         refreshed = 0
         for ticker in cands:
             try:
-                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=200)
+                df_5m = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=360)
                 await asyncio.sleep(0.1)
-                if df_5m is None or len(df_5m) < 60:
+                if df_5m is None or len(df_5m) < 300:
                     continue
-                ml_result = self.ml.predict_with_reasons(df_5m)
+                ml_result = self.ml.predict_with_reasons(df_5m, self.get_btc_5m())
                 if ticker in self.backtester.results_cache:
                     self.backtester.results_cache[ticker]['ml_prob'] = ml_result['prob']
                 refreshed += 1

@@ -150,52 +150,16 @@ class MLPredictor:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """[분봉 모델 v3] Colab 학습 노트북의 build_features와 1:1 동일 (11개 피처).
+    def build_features(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> pd.DataFrame:
+        """[분봉 모델 v4] Colab 학습 ↔ 서버 추론 1:1 공유 모듈 사용 (27개 피처).
 
-        ⚠️ 절대 임의 수정 금지 — Colab 학습 코드와 정확히 일치해야 모델이 정상 작동.
-        ⚠️ minute5 데이터로 학습됨 → 추론도 반드시 minute5 OHLCV df를 입력해야 함.
-
-        피처: volatility, ma_5, ma_20, ma_60, rsi, macd, macd_signal, macd_hist,
-              volume_ma_5, volume_ma_20, daily_range_pct
+        ⚠️ feature_engineering_v4.py가 단일 진실 공급원 — 임의 수정 금지.
+        ⚠️ minute5 OHLCV df + KRW-BTC minute5(btc_df) 둘 다 필요. 288봉 롤링 → 최소 300봉.
         """
-        # ma_60 + 워밍업 위해 최소 60봉 필요
-        if df is None or len(df) < 60:
+        from app.services.feature_engineering_v4 import build_features_v4
+        if btc_df is None:
             return pd.DataFrame()
-
-        features = pd.DataFrame(index=df.index)
-
-        # 가격 변동성 (종가 20봉 표준편차)
-        features['volatility'] = df['close'].rolling(window=20).std()
-
-        # 이동 평균선 (원시 가격값)
-        features['ma_5'] = df['close'].rolling(window=5).mean()
-        features['ma_20'] = df['close'].rolling(window=20).mean()
-        features['ma_60'] = df['close'].rolling(window=60).mean()
-
-        # RSI (rolling mean 방식 14)
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss.replace(0, 1e-9)
-        features['rsi'] = 100 - (100 / (1 + rs))
-
-        # MACD (12/26/9, 원시 가격 스케일)
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        features['macd'] = exp1 - exp2
-        features['macd_signal'] = features['macd'].ewm(span=9, adjust=False).mean()
-        features['macd_hist'] = features['macd'] - features['macd_signal']
-
-        # 거래량 이동평균 (원시값)
-        features['volume_ma_5'] = df['volume'].rolling(window=5).mean()
-        features['volume_ma_20'] = df['volume'].rolling(window=20).mean()
-
-        # (고가 - 저가) / 종가 * 100
-        features['daily_range_pct'] = (df['high'] - df['low']) / df['close'] * 100
-
-        features = features.replace([np.inf, -np.inf], np.nan)
-        return features
+        return build_features_v4(df, btc_df)
 
     def train(self, all_ohlcv_dict: dict):
         """
@@ -343,24 +307,29 @@ class MLPredictor:
     # 피처 이름 → 한글 설명 매핑
     # [분봉 모델 v3] 11개 피처 한글 라벨 (SHAP 근거 표시용)
     FEATURE_LABELS = {
-        'volatility': '변동성(20봉)',
-        'ma_5': 'MA5', 'ma_20': 'MA20', 'ma_60': 'MA60',
-        'rsi': 'RSI',
-        'macd': 'MACD', 'macd_signal': 'MACD 시그널', 'macd_hist': 'MACD 히스토그램',
-        'volume_ma_5': '거래량 MA5', 'volume_ma_20': '거래량 MA20',
-        'daily_range_pct': '고저 범위(%)',
+        'ret_1': '직전봉 수익률', 'ret_6': '30분 수익률', 'ret_12': '1시간 수익률',
+        'ma5_dist': 'MA5 이격', 'ma20_dist': 'MA20 이격', 'ma60_dist': 'MA60 이격',
+        'ma5_slope': 'MA5 기울기', 'ma20_slope': 'MA20 기울기',
+        'rsi': 'RSI', 'rsi_slope': 'RSI 기울기',
+        'macd_norm': 'MACD', 'macd_hist_norm': 'MACD 히스토그램', 'macd_hist_slope': 'MACD 히스토 기울기',
+        'volatility_pct': '변동성(%)', 'atr_pct': 'ATR(%)', 'daily_range_pct': '고저 범위(%)',
+        'vol_surge': '거래량 서지', 'vol_ratio': '거래량 비율',
+        'dist_high_24h': '24h 고점거리', 'dist_low_24h': '24h 저점거리',
+        'btc_ret_1h': 'BTC 1h', 'btc_ret_4h': 'BTC 4h', 'btc_ret_24h': 'BTC 24h',
+        'btc_ma_dist': 'BTC 레짐(MA이격)', 'coin_btc_corr': 'BTC 상관',
+        'hour_sin': '시간(sin)', 'hour_cos': '시간(cos)',
     }
 
-    def predict(self, df: pd.DataFrame) -> float:
+    def predict(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> float:
         """
-        단일 종목 DataFrame으로 상승 확률 예측
-        Returns: 0.0 ~ 1.0 (상승 확률), 모델 없으면 0.5
+        단일 종목 minute5 df(+BTC minute5)로 익절확률 예측
+        Returns: 0.0 ~ 1.0, 모델 없으면 0.5
         """
         if not self.is_trained or self.model is None:
             return 0.5
 
         try:
-            features = self.build_features(df)
+            features = self.build_features(df, btc_df)
             if features.empty:
                 return 0.5
 
@@ -384,9 +353,9 @@ class MLPredictor:
             print(f"⚠️ [ML Predict Error] {e}")
             return 0.5
 
-    def predict_with_reasons(self, df: pd.DataFrame) -> dict:
+    def predict_with_reasons(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> dict:
         """
-        상승 확률 + 코인별 SHAP 기여도 기반 주요 근거 반환
+        익절확률 + 코인별 SHAP 기여도 기반 주요 근거 반환
         XGBoost pred_contribs를 사용하여 개별 예측에 대한 피처 기여도를 계산
         Returns: { prob: float, reasons: [{ name, label, value, shap, direction }] }
         """
@@ -396,7 +365,7 @@ class MLPredictor:
         try:
             import xgboost as xgb
 
-            features = self.build_features(df)
+            features = self.build_features(df, btc_df)
             if features.empty:
                 return {"prob": 0.5, "reasons": []}
 
@@ -451,6 +420,6 @@ class MLPredictor:
             "accuracy": self.train_score,
             "train_date": self.train_date or "-",
             "features": len(self.feature_names),
-            "version": "v3-minute5",
+            "version": "v4-minute5",
             "label_threshold": LABEL_THRESHOLD_PCT,
         }

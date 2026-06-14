@@ -429,10 +429,11 @@ class Backtester:
             if self.ml.is_trained:
                 try:
                     df_5m = await asyncio.to_thread(
-                        pyupbit.get_ohlcv, ticker, interval="minute5", count=200
+                        pyupbit.get_ohlcv, ticker, interval="minute5", count=360
                     )
-                    if df_5m is not None and len(df_5m) >= 60:
-                        ml_prob = float(self.ml.predict(df_5m))
+                    if df_5m is not None and len(df_5m) >= 300:
+                        from app.services.trade_manager import trade_manager as _tm
+                        ml_prob = float(self.ml.predict(df_5m, _tm.get_btc_5m()))
                 except Exception:
                     ml_prob = None
 

@@ -61,12 +61,12 @@ async def analyze_coin(ticker: str):
                 # 캐시 없으면 즉시 minute5 가져와서 ML만 돌림(저장은 안 함)
                 try:
                     import pyupbit, asyncio
-                    df_for_ml = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=200)
+                    df_for_ml = await asyncio.to_thread(pyupbit.get_ohlcv, ticker, interval="minute5", count=360)
                 except Exception as e:
                     print(f">>> ⚠️ [Analysis] {ticker} minute5 조회 실패: {e}")
 
-            if df_for_ml is not None and len(df_for_ml) >= 60:
-                ml_result = trade_manager.ml.predict_with_reasons(df_for_ml)
+            if df_for_ml is not None and len(df_for_ml) >= 300:
+                ml_result = trade_manager.ml.predict_with_reasons(df_for_ml, trade_manager.get_btc_5m())
                 response_data['ml_prob'] = ml_result['prob']
                 response_data['ml_reasons'] = ml_result['reasons']
             else:
