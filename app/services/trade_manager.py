@@ -109,11 +109,13 @@ class TradeManager:
         from app.core.paper_repository import paper_repository
         self.paper_repo = paper_repository
         self.SHADOW_MODE = False  # ControlPanel/config로 토글
-        # 섀도우 완화안(손익분기 기준) — 라이브 영향 0, SHADOW_MODE일 때만 적용
-        # 목적: "기준 완화 시 거래 빈도·수익성"을 위험 없이 검증
-        self.SHADOW_ML_MIN_PROB = 0.364       # 손익분기 익절확률 (익절+3.5%/손절-2%)
-        self.SHADOW_BUY_THRESHOLD = 5.0       # 완화 점수 기준
-        self.SHADOW_ALLOW_ALL_REGIMES = True  # bear/neutral 포함 전 레짐 매수(게이트는 적용)
+        # 섀도우 검증 기준 — 라이브 영향 0, SHADOW_MODE일 때만 적용
+        # [세션28] v4 고신뢰 픽 깨끗한 측정 + 라이브 동일 조건(go-live 판단 직결)으로 전환:
+        #   0.364(marginal, 승률25%·음EV) → 0.42(라이브 ML 게이트) / score 5.0→5.5 / bear 차단(라이브와 동일)
+        #   → "지금 v4로 라이브 켜면 수익 나는가"를 위험 없이 측정. (이전: 완화 빈도 실험)
+        self.SHADOW_ML_MIN_PROB = 0.42        # 라이브 ML_MIN_PROB와 동일
+        self.SHADOW_BUY_THRESHOLD = 5.5       # 라이브 BUY_THRESHOLD와 동일
+        self.SHADOW_ALLOW_ALL_REGIMES = False  # bear 차단(라이브와 동일) — 약세장 픽은 ML 무관하게 손실
 
         # ═══ [좀비 청산 안전장치] N회 연속 확인 후에만 청산 ═══
         # 일시적/부분적 API 글리치(일부 코인만 누락)로 1회 읽기에 DB open trade가
