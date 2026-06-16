@@ -69,6 +69,7 @@ class TradeManager:
         self.MARKET_REGIME_TTL = 1800     # 30분 캐시
         self._last_bear_log = 0
         self._last_neutral_log = 0
+        self._ml_log_state = {}           # {ticker: (last_ts, last_prob_pct)} — ML 로그 throttle (세션29)
         self._market_regime_detail = {}   # {btc_price, ma24_dev_pct, mom6, updated} — 프론트 표시용
 
         # ═══ [개선 7] 레짐별 매수 임계값 — 약한 시장에서 엄격 진입 ═══
@@ -938,9 +939,17 @@ class TradeManager:
             # [분봉 모델 v3] ML 익절확률 필터 (손익분기 기반 임계값, 레짐별 적용)
             ml_prob = res.get('ml_prob')
             if self.ml.is_trained and ml_prob is not None:
-                print(f"  🤖 [ML] {ticker}: 익절확률 {ml_prob:.1%} (기준 {local_ml_min:.0%}, 레짐 {regime})")
+                # [세션29] 로그 throttle: 종목별로 확률이 바뀌거나 300초 경과 시에만 출력
+                # (매 루프 1초마다 전 타겟코인 출력 → journal 스팸 방지. skip_reason은 매번 갱신)
+                _now = time.time()
+                _prob_pct = round(ml_prob * 100)
+                _prev = self._ml_log_state.get(ticker)
+                if _prev is None or _now - _prev[0] > 300 or _prev[1] != _prob_pct:
+                    print(f"  🤖 [ML] {ticker}: 익절확률 {ml_prob:.1%} (기준 {local_ml_min:.0%}, 레짐 {regime})")
+                    if ml_prob < local_ml_min:
+                        print(f"  🚫 [Skip] {ticker}: 익절확률 낮음 ({ml_prob:.1%} < {local_ml_min:.0%}) [레짐: {regime}]")
+                    self._ml_log_state[ticker] = (_now, _prob_pct)
                 if ml_prob < local_ml_min:
-                    print(f"  🚫 [Skip] {ticker}: 익절확률 낮음 ({ml_prob:.1%} < {local_ml_min:.0%}) [레짐: {regime}]")
                     self._set_skip_reason(ticker, f"🤖 익절확률 낮음 ({ml_prob:.0%}) [{regime}]")
                     continue
             elif self.ml.is_trained and ml_prob is None:
