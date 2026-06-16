@@ -446,12 +446,18 @@ class TradeManager:
                     await self.update_target_coins()
                     await self.refresh_target_scores()
                     await self.refresh_ml_top_probs()
+                    await self.log_orderbooks()   # [v5] 호가 스냅샷 적재 (5분 주기)
                     self.cleanup_old_cache()
                 
                 now = datetime.now(KST)
                 if now.hour == 0 and now.minute == 1 and loop_count % 60 == 0:
                     asyncio.create_task(self.backtester.run_daily_scan())
                     self.sell_timestamps.clear()
+                    try:
+                        from app.core import orderbook_repository as obrepo
+                        obrepo.cleanup_old(30)  # 호가 이력 30일 보관
+                    except Exception:
+                        pass
 
                 # 야간 매매 제한 (22시~07시 KST)
                 is_night = now.hour >= self.NIGHT_BUY_BLOCK_START or now.hour < self.NIGHT_BUY_BLOCK_END
@@ -675,6 +681,35 @@ class TradeManager:
         except Exception as e:
             print(f"⚠️ [Orderbook] {ticker}: {e}")
             return True, 1.0  # 에러 시 통과
+
+    async def log_orderbooks(self):
+        """[v5 데이터수집] 타겟 코인 호가 스냅샷 적재 (진입타이밍 피처 학습용). 매매 영향 0.
+        업비트는 과거 호가 미제공 → 지금부터 모아야 v5에서 쓸 수 있음."""
+        try:
+            tickers = list(self.target_coins)
+            if not tickers:
+                return
+            obs = await asyncio.to_thread(pyupbit.get_orderbook, tickers)
+            if not isinstance(obs, list):
+                obs = [obs] if obs else []
+            rows = []
+            for i, ob in enumerate(obs):
+                if not ob or 'orderbook_units' not in ob:
+                    continue
+                tk = ob.get('market') or ob.get('code') or (tickers[i] if i < len(tickers) else None)
+                units = ob['orderbook_units'][:self.ORDERBOOK_DEPTH]
+                if not tk or not units:
+                    continue
+                bid_krw = sum(u['bid_price'] * u['bid_size'] for u in units)
+                ask_krw = sum(u['ask_price'] * u['ask_size'] for u in units)
+                mid = (units[0]['bid_price'] + units[0]['ask_price']) / 2
+                ratio = round(bid_krw / ask_krw, 4) if ask_krw > 0 else 0
+                rows.append((tk, mid, round(bid_krw), round(ask_krw), ratio))
+            if rows:
+                from app.core import orderbook_repository as obrepo
+                obrepo.insert_snapshots(rows)
+        except Exception as e:
+            print(f"⚠️ [OB Log] {e}")
 
     def _get_adaptive_ml_min(self, base_min: float) -> float:
         """그 날 전 코인의 ml_prob 분포에서 상위 (100 - PERCENTILE)% 기준값과

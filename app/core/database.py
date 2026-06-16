@@ -105,7 +105,21 @@ def init_db():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_news_critical ON news(is_critical, published_at DESC)')
-    
+
+    # 🔥 [v5 데이터수집] 호가창 이력 — 진입타이밍 피처 학습용 (업비트는 과거 호가 미제공 → 지금부터 적재)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS orderbook_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT,
+        ts TIMESTAMP,
+        mid_price REAL,
+        bid_krw REAL,        -- 상위5호가 매수 총액(KRW)
+        ask_krw REAL,        -- 상위5호가 매도 총액(KRW)
+        bid_ask_ratio REAL   -- bid_krw/ask_krw (1↑ 매수우세)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_oblog_ticker_ts ON orderbook_log(ticker, ts)')
+
     conn.commit()
     conn.close()
     print(f">>> DB connected: {DB_PATH}")
