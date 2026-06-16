@@ -1424,8 +1424,9 @@ class TradeManager:
                 self._update_market_status(ticker, current_price, res)
                 refreshed += 1
                 await asyncio.sleep(0.1)
-            except Exception:
-                pass
+            except Exception as e:
+                # [세션29] silent pass → 로깅 (카드 ml_prob None 원인 진단/가시화)
+                print(f"⚠️ [Refresh Error] {ticker}: {type(e).__name__}: {e}")
         if refreshed > 0:
             print(f">>> 🔄 [Refresh] 타겟 {refreshed}개 종목 점수 갱신 완료")
 
