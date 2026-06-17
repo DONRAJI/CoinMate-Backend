@@ -106,12 +106,14 @@ class PaperRepository:
                 """INSERT INTO paper_trades
                 (ticker, buy_price, buy_amount, buy_time, status, strategy_name,
                  buy_score, buy_ml_prob, buy_regime, buy_rsi,
-                 buy_news_sentiment, buy_news_critical_count, buy_orderbook_ratio)
-                VALUES (?,?,?,?,'open',?,?,?,?,?,?,?,?)""",
+                 buy_news_sentiment, buy_news_critical_count, buy_orderbook_ratio,
+                 buy_mom6h, buy_vol_surge, buy_pos24h)
+                VALUES (?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?)""",
                 (ticker, fill_price, amount, now_kst(), strategy_name,
                  context.get('score'), context.get('ml_prob'), context.get('regime'),
                  context.get('rsi'), context.get('news_sentiment'),
-                 context.get('news_critical_count'), context.get('orderbook_ratio')),
+                 context.get('news_critical_count'), context.get('orderbook_ratio'),
+                 context.get('mom6h'), context.get('vol_surge'), context.get('pos24h')),
             )
             c.commit()
         self.krw -= amount

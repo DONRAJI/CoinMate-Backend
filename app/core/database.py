@@ -67,10 +67,20 @@ def init_db():
         buy_rsi REAL,
         buy_news_sentiment REAL,
         buy_news_critical_count INTEGER,
-        buy_orderbook_ratio REAL
+        buy_orderbook_ratio REAL,
+        buy_mom6h REAL,
+        buy_vol_surge REAL,
+        buy_pos24h REAL
     )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_trades(status)')
+
+    # 🔥 [세션30] paper_trades 모멘텀 확실성 컨텍스트 마이그레이션 (idempotent)
+    paper_cols = {row[1] for row in cursor.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    for col, coltype in [("buy_mom6h", "REAL"), ("buy_vol_surge", "REAL"), ("buy_pos24h", "REAL")]:
+        if col not in paper_cols:
+            cursor.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {coltype}")
+            print(f">>> [Migration] paper_trades.{col} 컬럼 추가")
 
     # 2. 분봉 데이터 저장 테이블
     cursor.execute('''

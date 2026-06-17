@@ -118,6 +118,15 @@ class TradeManager:
         self.SHADOW_BUY_THRESHOLD = 5.5       # 라이브 BUY_THRESHOLD와 동일
         self.SHADOW_ALLOW_ALL_REGIMES = False  # bear 차단(라이브와 동일) — 약세장 픽은 ML 무관하게 손실
 
+        # ═══ [세션30] 모멘텀 확실성 게이트 — 섀도우 검증용 (라이브 영향 0) ═══
+        # 분석(6/16~17): 같은 ml_prob(0.435)인데 UNI(승) vs STRAX(패)를 가른 건 모델이 아니라
+        #   진입 전 모멘텀. 승=6h모멘텀+5.3%/거래량1.4배/고점위치84%, 패=-0.9%/0.6배/59%.
+        #   "확실한 종목=추세 추종 프로파일"을 섀도우 게이트에 넣어 승률 개선 여부 검증.
+        self.MOMENTUM_CERTAINTY_ON = True
+        self.MOM_MIN_6H = 0.0       # 진입 전 6h 모멘텀 > 0 (상승 추세)
+        self.VOL_SURGE_MIN = 1.0    # 최근 1h 거래량 >= 6h 평균 (관심 유입)
+        self.POS24H_MIN = 60.0      # 24h 고저 위치 >= 60% (고점권 = 추세 지속)
+
         # ═══ [좀비 청산 안전장치] N회 연속 확인 후에만 청산 ═══
         # 일시적/부분적 API 글리치(일부 코인만 누락)로 1회 읽기에 DB open trade가
         # 잘못 청산되던 버그 방지. 지갑에서 연속 N회 안 보일 때만 close_zombie 실행.
@@ -683,6 +692,25 @@ class TradeManager:
             print(f"⚠️ [Orderbook] {ticker}: {e}")
             return True, 1.0  # 에러 시 통과
 
+    def _momentum_certainty(self, df_5m):
+        """[세션30] 진입 시점 추세 확실성 — 섀도우 검증용 (라이브 무영향).
+        분석(6/16~17): 승 종목은 진입 전 6h모멘텀+/거래량급증/고점권 = 추세 추종 프로파일.
+        Returns: {mom6h, vol_surge, pos24h, certain} 또는 데이터부족 시 None.
+        """
+        if df_5m is None or len(df_5m) < 80:
+            return None
+        close, vol, high, low = df_5m['close'], df_5m['volume'], df_5m['high'], df_5m['low']
+        c0 = close.iloc[-1]
+        mom6h = (c0 / close.iloc[-73] - 1) * 100 if len(close) > 73 else 0.0
+        v6 = vol.iloc[-72:].mean()
+        vol_surge = (vol.iloc[-12:].mean() / v6) if len(vol) >= 72 and v6 > 0 else 0.0
+        w = min(len(close), 288)
+        hi, lo = high.iloc[-w:].max(), low.iloc[-w:].min()
+        pos24h = ((c0 - lo) / (hi - lo) * 100) if hi > lo else 50.0
+        certain = (mom6h > self.MOM_MIN_6H) and (vol_surge >= self.VOL_SURGE_MIN) and (pos24h >= self.POS24H_MIN)
+        return {"mom6h": round(float(mom6h), 2), "vol_surge": round(float(vol_surge), 2),
+                "pos24h": round(float(pos24h), 1), "certain": bool(certain)}
+
     async def log_orderbooks(self):
         """[v5 데이터수집] 타겟 코인 호가 스냅샷 적재 (진입타이밍 피처 학습용). 매매 영향 0.
         업비트는 과거 호가 미제공 → 지금부터 모아야 v5에서 쓸 수 있음."""
@@ -1042,6 +1070,18 @@ class TradeManager:
                     except Exception as _e:
                         pass
 
+                # 🔥 [세션30] 모멘텀 확실성 게이트 — 섀도우 검증용 (라이브 무영향)
+                # 같은 ml_prob라도 진입 전 추세(6h모멘텀/거래량/고점위치)가 승패를 가름.
+                # 섀도우에서만 적용해 "추세 확실 종목만 매수" 시 승률 개선 여부를 검증.
+                mom_ctx = None
+                if self.SHADOW_MODE and self.MOMENTUM_CERTAINTY_ON:
+                    mom_ctx = self._momentum_certainty(self.cached_5m_dfs.get(ticker))
+                    if mom_ctx and not mom_ctx['certain']:
+                        print(f"  🚫 [Skip] {ticker}: 모멘텀 약함 "
+                              f"(6h {mom_ctx['mom6h']}% / 거래량 {mom_ctx['vol_surge']}배 / 위치 {mom_ctx['pos24h']}%)")
+                        self._set_skip_reason(ticker, f"📉 모멘텀 약함 (6h {mom_ctx['mom6h']}%)")
+                        continue
+
                 strategies = [k for k, v in pick['strategies'].items() if v == 1]
                 strategy_name = "+".join(strategies) if strategies else "AI_Ensemble"
 
@@ -1056,6 +1096,11 @@ class TradeManager:
                     "rsi": round(float(pick.get('rsi', 0)), 1),
                     "orderbook_ratio": ob_ratio,
                 }
+                # [세션30] 모멘텀 확실성 지표 저장 (섀도우 검증용 — 승률 상관 사후분석)
+                if mom_ctx:
+                    buy_context["mom6h"] = mom_ctx['mom6h']
+                    buy_context["vol_surge"] = mom_ctx['vol_surge']
+                    buy_context["pos24h"] = mom_ctx['pos24h']
                 # [Phase 1B] 매수 시점 뉴스 컨텍스트 (참고/분석용, 매매에 직접 영향 없음)
                 try:
                     from app.services.news_collector import news_collector as _nc
