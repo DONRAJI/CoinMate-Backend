@@ -726,9 +726,11 @@ class TradeManager:
             return True, 1.0  # 에러 시 통과
 
     def _momentum_certainty(self, df_5m):
-        """[세션30] 진입 시점 추세 확실성 — 섀도우 검증용 (라이브 무영향).
-        분석(6/16~17): 승 종목은 진입 전 6h모멘텀+/거래량급증/고점권 = 추세 추종 프로파일.
-        Returns: {mom6h, vol_surge, pos24h, certain} 또는 데이터부족 시 None.
+        """[세션30→34] 진입 시점 추세 확실성 — 섀도우 검증용 (라이브 무영향).
+        [세션34 교차검증] 6/17백업 22건(UNI제외 약세장) + 실거래 79건 두 소스로 점검:
+          - mom6h(6h모멘텀)만 둘 다 부호변별(승+/패−), ml과 독립 → 진짜 신호
+          - vol_surge/pos24h 변별은 UNI 5건(동일시점) 편향이었음(가짜) → 게이트서 제외
+        Returns: {mom6h, vol_surge, pos24h, certain} (vol/pos는 기록·관찰용).
         """
         if df_5m is None or len(df_5m) < 80:
             return None
@@ -740,7 +742,8 @@ class TradeManager:
         w = min(len(close), 288)
         hi, lo = high.iloc[-w:].max(), low.iloc[-w:].min()
         pos24h = ((c0 - lo) / (hi - lo) * 100) if hi > lo else 50.0
-        certain = (mom6h > self.MOM_MIN_6H) and (vol_surge >= self.VOL_SURGE_MIN) and (pos24h >= self.POS24H_MIN)
+        # [세션34] mom6h만 게이트 사용 (vol_surge/pos24h는 UNI 편향 가짜 → 기록만 유지)
+        certain = (mom6h > self.MOM_MIN_6H)
         return {"mom6h": round(float(mom6h), 2), "vol_surge": round(float(vol_surge), 2),
                 "pos24h": round(float(pos24h), 1), "certain": bool(certain)}
 
