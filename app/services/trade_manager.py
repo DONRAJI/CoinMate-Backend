@@ -56,8 +56,12 @@ class TradeManager:
         self.NIGHT_BUY_BLOCK_END = 7     # 07시까지
 
         # ═══ [개선 2] 연속 손절 쿨오프 (점진적 강화) ═══
-        self.recent_trade_results = []    # 최근 거래 결과 (True=승, False=패)
+        self.recent_trade_results = []    # 최근 거래 (win:bool, ts:float) 튜플 — [세션35] 시간 윈도우 연패 판정
         self.CONSECUTIVE_LOSS_LIMIT = 3   # N연패 시 매수 중단
+        # [세션35] 연패 인정 시간창: 이 안에서 연속된 손절만 "연패"로 카운트.
+        # 원래 의도 = "코인장이 한번에 움직임 → 짧은 시간 연속 손절 시 잠깐 쉼".
+        # 시간창 없으면 며칠 간격 손절도 연패로 잡혀 거래가 잠기던 문제(사용자 지적) 해결.
+        self.LOSS_STREAK_WINDOW = 21600   # 6시간
         self.loss_cooloff_until = 0       # 쿨오프 해제 시간 (timestamp)
         self.LOSS_COOLOFF_SECONDS = 3600  # 기본 1시간 (연패 지속 시 2h→4h로 강화)
         self.cooloff_level = 0            # 쿨오프 강도 단계 (승리 시 0으로 리셋)
@@ -242,52 +246,54 @@ class TradeManager:
         except Exception as e:
             print(f">>> ⚠️ [Config] 저장 실패: {e}")
 
+    def _parse_sell_ts(self, st):
+        """sell_time 문자열 → epoch(KST). 실패 시 None."""
+        if not st:
+            return None
+        s = str(st).replace('T', ' ').split('.')[0].split('+')[0].strip()
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+            try:
+                return datetime.strptime(s, fmt).replace(tzinfo=KST).timestamp()
+            except ValueError:
+                continue
+        return None
+
+    def _count_recent_loss_streak(self):
+        """[세션35] 최근 LOSS_STREAK_WINDOW(6h) 내 연속 손절 수.
+        시간창 밖 손절을 만나면 연속이 끊긴 것으로 간주 → 며칠 간격 손절은 연패 아님."""
+        now = time.time()
+        consecutive = 0
+        for win, ts in reversed(self.recent_trade_results):
+            if (not win) and (now - ts) <= self.LOSS_STREAK_WINDOW:
+                consecutive += 1
+            else:
+                break
+        return consecutive
+
     def _restore_loss_state(self):
-        """재시작 시 DB의 최근 거래 결과로 연패 카운터 복원 (인메모리 초기화 방지).
-        🔥 쿨오프는 '마지막 손절 시각' 기준으로 복원 → 재배포 반복해도 타이머가 리셋되지 않음.
+        """재시작 시 DB의 최근 거래로 연패 카운터 복원 (인메모리 초기화 방지).
+        [세션35] (win, ts) 튜플 + 시간창(LOSS_STREAK_WINDOW)으로 '최근 N시간 내 연속 손절'만 연패 인정.
         """
         try:
             rows = self.repo.get_closed_trades(limit=10)  # sell_time DESC
             results = []
-            for r in reversed(rows):
+            for r in reversed(rows):  # 오래된 → 최신
                 pr = r['profit_rate'] if 'profit_rate' in r.keys() else None
                 if pr is None:
                     continue
-                results.append(pr > 0)  # True=승, False=패
+                ts = self._parse_sell_ts(r['sell_time'] if 'sell_time' in r.keys() else None)
+                results.append((pr > 0, ts if ts is not None else time.time()))
             self.recent_trade_results = results[-10:]
 
-            consecutive = 0
-            for win in reversed(self.recent_trade_results):
-                if not win:
-                    consecutive += 1
-                else:
-                    break
+            consecutive = self._count_recent_loss_streak()
             if consecutive > 0:
-                print(f">>> 🔁 [복원] 최근 거래 {len(self.recent_trade_results)}건, 현재 {consecutive}연패 상태")
+                print(f">>> 🔁 [복원] 최근 거래 {len(self.recent_trade_results)}건, {self.LOSS_STREAK_WINDOW//3600}h내 {consecutive}연패")
 
             if consecutive >= self.CONSECUTIVE_LOSS_LIMIT:
                 self.cooloff_level = min(consecutive - self.CONSECUTIVE_LOSS_LIMIT + 1, self.MAX_COOLOFF_LEVEL)
                 duration = self.LOSS_COOLOFF_SECONDS * (2 ** (self.cooloff_level - 1))
-
-                # 🔥 마지막 손절 시각(sell_time)을 기준으로 쿨오프 종료시점 계산
-                last_sell_ts = None
-                if rows:
-                    try:
-                        st = rows[0]['sell_time'] if 'sell_time' in rows[0].keys() else None
-                        if st:
-                            s = str(st).replace('T', ' ').split('.')[0].split('+')[0].strip()
-                            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
-                                try:
-                                    dt = datetime.strptime(s, fmt).replace(tzinfo=KST)
-                                    last_sell_ts = dt.timestamp()
-                                    break
-                                except ValueError:
-                                    continue
-                    except Exception:
-                        last_sell_ts = None
-
+                last_sell_ts = self._parse_sell_ts(rows[0]['sell_time']) if (rows and 'sell_time' in rows[0].keys()) else None
                 if last_sell_ts is None:
-                    # sell_time 파싱 실패 시에만 보수적으로 now 기준
                     self.loss_cooloff_until = time.time() + duration
                     print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 {duration//60}분 (시각 미상, now 기준)")
                 else:
@@ -297,7 +303,6 @@ class TradeManager:
                         self.loss_cooloff_until = cooloff_end
                         print(f">>> 🧊 [복원] {consecutive}연패 → 쿨오프 잔여 {remaining/60:.0f}분 (마지막 손절 기준)")
                     else:
-                        # 이미 쿨오프 시간이 지남 → 적용 안 함 (재배포 반복해도 안 걸림)
                         print(f">>> ✅ [복원] {consecutive}연패지만 마지막 손절 후 {(-remaining)/3600:.1f}h 경과 → 쿨오프 해제됨")
         except Exception as e:
             print(f"⚠️ [Loss State Restore Error] {e}")
@@ -663,22 +668,17 @@ class TradeManager:
                     if ticker in self.market_status:
                         self.market_status[ticker]["category"] = "관찰 종목"
 
-                    # ═══ [개선 2] 연속 손절 추적 (점진적 쿨오프) ═══
+                    # ═══ [개선 2] 연속 손절 추적 (점진적 쿨오프) — [세션35] 시간창 6h 내 연속만 ═══
                     is_loss = profit_rate <= 0
-                    self.recent_trade_results.append(not is_loss)
+                    self.recent_trade_results.append((not is_loss, time.time()))
                     if len(self.recent_trade_results) > 10:
                         self.recent_trade_results = self.recent_trade_results[-10:]
 
                     if not is_loss:
                         self.cooloff_level = 0  # 승리 시 쿨오프 강도 초기화
 
-                    # 최근 N건 연속 패배 체크
-                    consecutive_losses = 0
-                    for r in reversed(self.recent_trade_results):
-                        if not r:
-                            consecutive_losses += 1
-                        else:
-                            break
+                    # 최근 6h 내 연속 패배만 카운트 (며칠 간격 손절은 연패 아님)
+                    consecutive_losses = self._count_recent_loss_streak()
 
                     if consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
                         # 연패가 지속될수록 쿨오프 강화: 1h → 2h → 4h
