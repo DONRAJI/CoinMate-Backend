@@ -137,6 +137,12 @@ class TradeManager:
         # 이 차단들이 먼저 걸러 게이트를 무력화 → 섀도우만 완화해 게이트를 제대로 검증. (RSI/MFI 괴리는 유지)
         self.SHADOW_RELAX_TREND_FILTERS = True
 
+        # ═══ [세션33] 섀도우 매도: 손절을 모델 라벨(STOP_LOSS=-2%)에 고정 ═══
+        # 현재 ATR 손절(max(-2.0, -(ATR%×1.5)))은 잔잔한 코인을 -0.75%에 털어 모델 라벨(-2%)과
+        # 불일치(노이즈 손절, 실데이터 손절 min -0.72%). 섀도우만 -2% 고정 → "모델 라벨대로 매도 시
+        # ml_prob가 실제와 맞는지" 검증. (익절/트레일링 유지 — +3.5% 보장은 트레이드오프 커서 보류)
+        self.SHADOW_FIX_STOP_LOSS = True
+
         # ═══ [좀비 청산 안전장치] N회 연속 확인 후에만 청산 ═══
         # 일시적/부분적 API 글리치(일부 코인만 누락)로 1회 읽기에 DB open trade가
         # 잘못 청산되던 버그 방지. 지갑에서 연속 N회 안 보일 때만 close_zombie 실행.
@@ -566,6 +572,11 @@ class TradeManager:
                 else:
                     stop_loss = self.STOP_LOSS
                     profit_target = self.PROFIT_TARGET
+
+            # [세션33] 섀도우 손절을 모델 라벨(-2%)에 고정 — ATR로 -2%보다 얕아지는 노이즈 손절 방지
+            # (라이브는 기존 ATR 동적 유지. 익절/트레일링은 양 모드 동일.)
+            if self.SHADOW_MODE and self.SHADOW_FIX_STOP_LOSS:
+                stop_loss = self.STOP_LOSS
 
             # 보유 시간 계산 (시간 기반 탈출용)
             bought_at = trade['buy_time'] if 'buy_time' in trade.keys() else None
