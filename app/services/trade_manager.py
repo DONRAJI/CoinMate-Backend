@@ -131,6 +131,12 @@ class TradeManager:
         self.VOL_SURGE_MIN = 1.0    # 최근 1h 거래량 >= 6h 평균 (관심 유입)
         self.POS24H_MIN = 60.0      # 24h 고저 위치 >= 60% (고점권 = 추세 지속)
 
+        # ═══ [세션32] 섀도우에서 추세역행 필터(급등/고점/과열) 완화 — 모멘텀 게이트와 충돌 해소 ═══
+        # 급등(3h+5%/1h+3%)·고점근접(6h 98%)·과열(RSI75/MFI85) 차단은 역추세(눌림목) 지향인데,
+        # 세션30 데이터는 추세추종(고점권/모멘텀+)이 이김. 모멘텀 게이트가 추세종목을 요구하므로
+        # 이 차단들이 먼저 걸러 게이트를 무력화 → 섀도우만 완화해 게이트를 제대로 검증. (RSI/MFI 괴리는 유지)
+        self.SHADOW_RELAX_TREND_FILTERS = True
+
         # ═══ [좀비 청산 안전장치] N회 연속 확인 후에만 청산 ═══
         # 일시적/부분적 API 글리치(일부 코인만 누락)로 1회 읽기에 DB open trade가
         # 잘못 청산되던 버그 방지. 지갑에서 연속 N회 안 보일 때만 close_zombie 실행.
@@ -826,6 +832,8 @@ class TradeManager:
         # 섀도우 완화 검증 모드는 bear도 매수 허용(게이트는 적용) → 약세장 거래 데이터 수집
         regime = self._get_market_regime()
         shadow_relax = self.SHADOW_MODE
+        # [세션32] 섀도우 추세역행 필터 완화 여부 (급등/고점/과열 차단 스킵 — 모멘텀 게이트가 대체)
+        relax_trend = shadow_relax and self.SHADOW_RELAX_TREND_FILTERS
         if regime == "bear" and not (shadow_relax and self.SHADOW_ALLOW_ALL_REGIMES):
             if time.time() - self._last_bear_log > 600:  # 10분마다 로그
                 print(f"  🐻 [Market] BTC 하락장 감지 → 신규 매수 전면 차단")
@@ -937,11 +945,12 @@ class TradeManager:
                 continue
 
             # 점수 통과 → 이후 필터 로그 출력
-            if rsi >= 75:
+            # [세션32] 과열(RSI/MFI) 차단은 섀도우에서 완화 (강세 추세종목은 RSI 높은 게 정상)
+            if rsi >= 75 and not relax_trend:
                 print(f"  🚫 [Skip] {ticker}: RSI과열({rsi:.1f})")
                 self._set_skip_reason(ticker, f"🔥 RSI 과열 ({rsi:.0f})")
                 continue
-            if mfi >= 85:
+            if mfi >= 85 and not relax_trend:
                 print(f"  🚫 [Skip] {ticker}: MFI과열({mfi:.1f})")
                 self._set_skip_reason(ticker, f"🔥 MFI 과열 ({mfi:.0f})")
                 continue
@@ -951,8 +960,9 @@ class TradeManager:
                 continue
 
             # === 급등 직후 진입 차단 (고점 물림 방지) ===
+            # [세션32] 섀도우에서 완화 — 급등은 추세 시작 신호일 수 있음(모멘텀 게이트가 품질 선별)
             # 직전 3봉(3시간) 동안의 가격 상승률 확인
-            if len(df_min) >= 4:
+            if len(df_min) >= 4 and not relax_trend:
                 price_3h_ago = df_min['close'].iloc[-4]
                 recent_surge = ((current - price_3h_ago) / price_3h_ago) * 100 if price_3h_ago > 0 else 0
                 if recent_surge >= 5.0:
@@ -961,7 +971,7 @@ class TradeManager:
                     continue
 
             # 직전 1봉(1시간) 급등 — 더 타이트하게
-            if len(df_min) >= 2:
+            if len(df_min) >= 2 and not relax_trend:
                 price_1h_ago = df_min['close'].iloc[-2]
                 recent_1h = ((current - price_1h_ago) / price_1h_ago) * 100 if price_1h_ago > 0 else 0
                 if recent_1h >= 3.0:
@@ -970,8 +980,9 @@ class TradeManager:
                     continue
 
             # === 고점 근접 진입 차단 ===
+            # [세션32] 섀도우에서 완화 — 고점권은 추세 지속 신호(세션30 승리종목 평균 고점위치 84%)
             # 현재가가 직전 6봉(6시간) 최고가 대비 98% 이상이면 고점 진입
-            if len(df_min) >= 6:
+            if len(df_min) >= 6 and not relax_trend:
                 recent_high = df_min['high'].iloc[-6:].max()
                 if recent_high > 0:
                     high_ratio = current / recent_high
