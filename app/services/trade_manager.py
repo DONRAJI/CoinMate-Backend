@@ -116,7 +116,11 @@ class TradeManager:
         #   → "지금 v4로 라이브 켜면 수익 나는가"를 위험 없이 측정. (이전: 완화 빈도 실험)
         self.SHADOW_ML_MIN_PROB = 0.42        # 라이브 ML_MIN_PROB와 동일
         self.SHADOW_BUY_THRESHOLD = 5.5       # 라이브 BUY_THRESHOLD와 동일
-        self.SHADOW_ALLOW_ALL_REGIMES = False  # bear 차단(라이브와 동일) — 약세장 픽은 ML 무관하게 손실
+        # [세션31] bear 동안 모멘텀 게이트 검증 데이터를 수집하려 True로 전환(섀도우만).
+        #   → bear에서도 ML≥0.42 + score≥5.5 + 모멘텀 확실 종목은 매수.
+        #   "약세장에도 추세 확실 종목은 통하나?"(세션29 약세장 결론 반증 여부)를 검증.
+        #   ⚠️ 라이브-미러(bear 차단) 의미는 약해짐 → 사후분석은 buy_regime으로 분리.
+        self.SHADOW_ALLOW_ALL_REGIMES = True
 
         # ═══ [세션30] 모멘텀 확실성 게이트 — 섀도우 검증용 (라이브 영향 0) ═══
         # 분석(6/16~17): 같은 ml_prob(0.435)인데 UNI(승) vs STRAX(패)를 가른 건 모델이 아니라
