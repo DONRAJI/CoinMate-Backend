@@ -413,6 +413,17 @@ class TradeManager:
         except Exception:
             pass
 
+        # [세션31] 섀도우 검증 중엔 라이브 거래가 0건이라, 가상거래도 일일 요약에 포함
+        shadow = None
+        if self.SHADOW_MODE:
+            try:
+                shadow = self.paper_repo.get_today_stats()
+                st = self.paper_repo.get_stats()
+                shadow["total_assets"] = int(st["total_assets"])
+                shadow["return_pct"] = st["return_pct"]
+            except Exception:
+                shadow = None
+
         regime_emoji = {"bull": "🐂 상승장", "neutral": "😐 중립", "bear": "🐻 하락장"}
         return {
             "today_trades": today_trades,
@@ -422,6 +433,7 @@ class TradeManager:
             "krw_balance": int(krw),
             "open_count": open_count,
             "regime": regime_emoji.get(self._market_regime_cache or "neutral", "?"),
+            "shadow": shadow,
         }
 
     async def run_loop(self):

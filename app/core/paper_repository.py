@@ -176,6 +176,26 @@ class PaperRepository:
             "return_pct": round((self.krw + open_value - INITIAL_KRW) / INITIAL_KRW * 100, 2),
         }
 
+    def get_today_stats(self):
+        """[세션31] 오늘(KST) closed 가상거래 집계 — 일일 요약 알림용."""
+        today = now_kst().strftime("%Y-%m-%d")
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT profit_rate, buy_amount FROM paper_trades "
+                "WHERE status='closed' AND substr(sell_time,1,10)=? AND profit_rate IS NOT NULL",
+                (today,),
+            ).fetchall()
+            open_n = c.execute("SELECT COUNT(*) FROM paper_trades WHERE status='open'").fetchone()[0]
+        n = len(rows)
+        wins = sum(1 for r in rows if r['profit_rate'] > 0)
+        pnl = sum(
+            (r['buy_amount'] or 0) * (1 - 0.0005) * (1 + (r['profit_rate'] or 0) / 100) * (1 - 0.0005) - (r['buy_amount'] or 0)
+            for r in rows
+        )
+        return {"trades": n, "wins": wins,
+                "win_rate": round(wins / n * 100, 1) if n else 0,
+                "pnl": int(pnl), "open": open_n}
+
     def get_closed(self, limit=50):
         with self._conn() as c:
             return c.execute(

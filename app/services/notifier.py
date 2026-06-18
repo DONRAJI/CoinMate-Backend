@@ -178,6 +178,18 @@ async def notify_daily_summary(stats: dict):
     ]
     if stats.get("regime"):
         fields.append({"name": "BTC 레짐", "value": stats["regime"], "inline": False})
+
+    # [세션31] 섀도우(가상) 거래 검증 중 — 일일 요약에 가상거래도 표시
+    shadow = stats.get("shadow")
+    if shadow:
+        s_pnl = shadow.get("pnl", 0)
+        s_sign = "+" if s_pnl >= 0 else ""
+        fields.append({"name": "🧪 가상 거래", "value": f"{shadow.get('trades', 0)}건", "inline": False})
+        fields.append({"name": "🧪 가상 승률", "value": f"{shadow.get('win_rate', 0):.0f}% ({shadow.get('wins', 0)}/{shadow.get('trades', 0)})"})
+        fields.append({"name": "🧪 가상 손익", "value": f"{s_sign}{s_pnl:,.0f}원"})
+        fields.append({"name": "🧪 가상 자산", "value": f"{shadow.get('total_assets', 0):,.0f}원 ({shadow.get('return_pct', 0):+.2f}%)"})
+        fields.append({"name": "🧪 가상 보유", "value": f"{shadow.get('open', 0)}건"})
+
     await _send_embed(
         title=f"{pnl_emoji} 일일 요약 · {datetime.now(KST).strftime('%m/%d')}",
         color=pnl_color,
