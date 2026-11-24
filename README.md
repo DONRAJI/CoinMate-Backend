@@ -228,10 +228,15 @@ app/
     └── notifier.py               # Discord 알림 (Embed)
 
 notebooks/
-├── CoinMate_ML_Minute_Training.ipynb  # Colab 학습
+├── CoinMate_ML_Minute_Training.ipynb  # Colab 학습 (현행 분봉 v4)
 ├── feature_engineering_v4.py          # ★ app/services 사본 (내용 동일 유지)
 ├── validate_model_v4.py               # 배포 전 5게이트 검증
-└── V4_RETRAIN_GUIDE.md                # v3 → v4 재설계 근거 + 재학습 절차
+├── V4_RETRAIN_GUIDE.md                # v3 → v4 재설계 근거 + 재학습 절차
+└── legacy_daily_model_training.ipynb  # 구 일봉 모델 학습 (폐기 라인 · Optuna 튜닝 / LightGBM 비교 기록)
+
+scripts/
+├── backup_db.sh                       # DB 일일 백업 (systemd timer, 7일 보관)
+└── health_check.sh                    # 5분 헬스체크 + 디스크 경보 → Discord
 ```
 
 ---
