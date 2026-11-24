@@ -166,7 +166,7 @@ class Strategy:
                 print(log)
             print("-" * 60)
             print(f" 🔍 RSI: {rsi_val:.1f} | MFI: {mfi_val:.1f} | Osc_Ratio: {osc_ratio:.2f}")
-            print(f" 🏆 최종 점수: {final_score} / 13.5 (매수 기준: {self.BUY_THRESHOLD})")
+            print(f" 🏆 최종 점수: {final_score} / 12.75 (매수 기준: {self.BUY_THRESHOLD})")
             print(f" 🚦 판단: {'BUY 🚀' if final_score >= self.BUY_THRESHOLD else 'WAIT ✋'}")
             print("="*60 + "\n")
 

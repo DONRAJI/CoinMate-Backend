@@ -568,13 +568,15 @@ class Backtester:
         return [c['ticker'] for c in sorted_cands[:top_n]]
 
     def get_ml_top_coins(self, top_n=10, vol_map=None, min_vol=0):
-        """[분봉 모델 v3] 익절 확률 상위 코인 Top N.
-        손익분기 36.4%(익절+3.5%/손절-2%) 이상만 표시 — 기대수익 + 인 코인.
+        """[분봉 모델 v4] 익절 확률 상위 코인 Top N.
+        [세션34] 매수 기준 42% 이상만 표시 — 봇이 실제 매수하는 종목과 일치
+        (이전 손익분기 0.364는 매수 안 되는 38% 종목까지 노출돼 혼란 → 0.42로 통일).
         vol_map/min_vol 제공 시 거래대금 필터 적용 (잡코인 제외 — 실제 매수 후보와 일치).
         """
+        BUY_MIN_PROB = 0.42  # 라이브/섀도우 매수 기준 ML_MIN_PROB와 동일
         candidates = []
         for c in self.results_cache.values():
-            if c.get('ml_prob') is None or c['ml_prob'] < 0.364:
+            if c.get('ml_prob') is None or c['ml_prob'] < BUY_MIN_PROB:
                 continue
             # 거래대금 필터 (실제 매수 가능한 유동성 종목만)
             if vol_map is not None and min_vol > 0:
